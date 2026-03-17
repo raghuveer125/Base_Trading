@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
-from services.execution_service.app.models import BrokerPlaceOrderRequest, BrokerPlaceOrderResponse
+from services.execution_service.app.models import BrokerPlaceOrderRequest
 from services.execution_service.app.order_state_machine import (
     InvalidOrderTransition,
     OrderStateMachine,
@@ -10,7 +10,8 @@ from services.execution_service.app.order_state_machine import (
     normalize_broker_status,
 )
 from services.execution_service.app.processor import ExecutionProcessor
-from services.execution_service.app.service import ExecutionService
+from services.execution_service.app.service import ExecutionService, UnknownBrokerUpdateOrderError
+from services.execution_service.app.update_consumer import BrokerUpdateConsumer
 from shared.config.settings import Settings
 
 
@@ -143,6 +144,25 @@ class FakePersistenceRepository:
     def get_order_by_idempotency_key(self, idempotency_key: str):
         for order in self.orders.values():
             if order["idempotency_key"] == idempotency_key:
+                class P:
+                    pass
+                p = P()
+                p.order_id = order["order_id"]
+                return p
+        return None
+
+    def get_order(self, order_id: str):
+        if order_id not in self.orders:
+            return None
+        class P:
+            pass
+        p = P()
+        p.order_id = order_id
+        return p
+
+    def get_order_by_external_order_id(self, external_order_id: str):
+        for order in self.orders.values():
+            if order["external_order_id"] == external_order_id:
                 class P:
                     pass
                 p = P()
@@ -355,20 +375,91 @@ def test_register_manual_test_order_is_idempotent() -> None:
         persistence_repository=repo,
     )
 
-    response = BrokerPlaceOrderResponse(
-        broker="fyers_stub",
-        adapter="fyers",
-        accepted=True,
-        status="accepted",
-        external_order_id="ext-1",
-        message="accepted",
+    request = BrokerPlaceOrderRequest(
+        symbol="NSE:SBIN-EQ",
+        side="BUY",
+        quantity=1,
         correlation_id="manual-test-correlation",
         idempotency_key="manual-test-idempotency",
-        raw_response={"symbol": "NSE:SBIN-EQ"},
     )
-    first_id = service.register_manual_test_order(response)
-    second_id = service.register_manual_test_order(response)
 
-    assert first_id == second_id
+    first = service.submit_order_request(request, "manual submit")
+    second = service.submit_order_request(request, "manual submit duplicate")
+    assert first.order_id == second.duplicate_of_order_id
     assert len(repo.orders) == 1
     assert len(repo.events) == 2
+
+
+def test_broker_update_consumer_normalizes_payload() -> None:
+    consumer = BrokerUpdateConsumer()
+    envelope = consumer.normalize_update(
+        {
+            "external_order_id": "ext-1",
+            "status": "OPEN",
+        },
+        source="broker_webhook",
+    )
+    assert envelope.external_order_id == "ext-1"
+    assert envelope.broker_status == "OPEN"
+    assert envelope.source == "broker_webhook"
+
+
+def test_consume_broker_update_by_external_order_id() -> None:
+    settings = build_settings("fyers_stub")
+    store = InMemoryOrderLifecycleStore()
+    repo = FakePersistenceRepository()
+    service = ExecutionService(
+        settings=settings,
+        signal_reader=None,
+        processor=ExecutionProcessor(settings=settings),
+        broker_adapter=build_broker_adapter(settings=settings),
+        lifecycle_store=store,
+        state_machine=OrderStateMachine(),
+        persistence_repository=repo,
+        update_consumer=BrokerUpdateConsumer(),
+    )
+
+    request = BrokerPlaceOrderRequest(
+        symbol="NSE:SBIN-EQ",
+        side="BUY",
+        quantity=1,
+        correlation_id="manual-test-correlation",
+        idempotency_key="manual-test-idempotency",
+    )
+    placed = service.submit_order_request(request, "manual submit")
+    assert placed.order_id is not None
+    assert placed.external_order_id is not None
+
+    event = service.consume_broker_update(
+        {
+            "external_order_id": placed.external_order_id,
+            "status": "OPEN",
+        },
+        source="broker_webhook",
+    )
+    assert event.order_id == placed.order_id
+    assert event.to_status == OrderStatus.OPEN
+    assert event.raw_payload is not None
+    assert event.raw_payload["update_source"] == "broker_webhook"
+
+
+def test_consume_broker_update_unknown_order_raises() -> None:
+    settings = build_settings("fyers_stub")
+    service = ExecutionService(
+        settings=settings,
+        signal_reader=None,
+        processor=ExecutionProcessor(settings=settings),
+        broker_adapter=build_broker_adapter(settings=settings),
+        lifecycle_store=InMemoryOrderLifecycleStore(),
+        state_machine=OrderStateMachine(),
+        update_consumer=BrokerUpdateConsumer(),
+    )
+    try:
+        service.consume_broker_update(
+            {"external_order_id": "ext-missing", "status": "OPEN"},
+            source="broker_webhook",
+        )
+    except UnknownBrokerUpdateOrderError as exc:
+        assert "Unable to resolve order" in str(exc)
+    else:
+        raise AssertionError("Expected UnknownBrokerUpdateOrderError")

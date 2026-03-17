@@ -7,7 +7,9 @@ from services.execution_service.app.models import (
     BrokerHealth,
     BrokerPlaceOrderResponse,
     ExecutionServiceStatus,
+    OrderEventView,
 )
+from services.execution_service.app.order_state_machine import OrderStatus
 import services.execution_service.app.api as execution_api
 
 
@@ -67,31 +69,17 @@ class FakeExecutionService:
         )
 
     def submit_order_request(self, request, submit_message: str) -> BrokerPlaceOrderResponse:
-        if request.idempotency_key == "manual-test-idempotency":
-            return BrokerPlaceOrderResponse(
-                broker="fyers_stub",
-                adapter="fyers",
-                accepted=True,
-                status="accepted",
-                external_order_id="stub-NSE_SBIN-EQ-buy-1-test",
-                message=submit_message,
-                correlation_id=request.correlation_id,
-                idempotency_key=request.idempotency_key,
-                raw_response={"symbol": "NSE:SBIN-EQ"},
-                order_id="ord-manual-test-api",
-            )
         return BrokerPlaceOrderResponse(
             broker="fyers_stub",
             adapter="fyers",
             accepted=True,
-            status="duplicate",
-            external_order_id=None,
-            message="duplicate",
+            status="accepted",
+            external_order_id="stub-NSE_SBIN-EQ-buy-1-test",
+            message=submit_message,
             correlation_id=request.correlation_id,
             idempotency_key=request.idempotency_key,
-            raw_response={"duplicate": True},
+            raw_response={"symbol": "NSE:SBIN-EQ"},
             order_id="ord-manual-test-api",
-            duplicate_of_order_id="ord-manual-test-api",
         )
 
     def list_order_lifecycle(self):
@@ -99,6 +87,17 @@ class FakeExecutionService:
 
     def get_order_history(self, order_id: str):
         return []
+
+    def consume_broker_update(self, payload: dict[str, object], source: str = "api") -> OrderEventView:
+        return OrderEventView(
+            order_id="ord-manual-test-api",
+            from_status=OrderStatus.ACKNOWLEDGED,
+            to_status=OrderStatus.OPEN,
+            event_type="broker_update",
+            event_time=datetime(2026, 3, 18, 12, 1, tzinfo=UTC),
+            message="Broker update mapped from OPEN",
+            raw_payload={"external_order_id": "ext-1", "update_source": source},
+        )
 
 
 execution_api.build_execution_service = lambda: FakeExecutionService()
@@ -173,3 +172,14 @@ def test_order_listing_endpoint() -> None:
 def test_order_history_endpoint_404_when_missing() -> None:
     response = client.get("/execution-service/orders/ord-unknown/history")
     assert response.status_code == 404
+
+
+def test_consume_broker_update_endpoint() -> None:
+    response = client.post(
+        "/execution-service/broker/consume-update",
+        json={"external_order_id": "ext-1", "status": "OPEN"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["event"]["order_id"] == "ord-manual-test-api"
+    assert body["event"]["to_status"] == "open"

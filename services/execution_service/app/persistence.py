@@ -232,6 +232,48 @@ class OrderPersistenceRepository:
             last_updated_at=row[10],
         )
 
+    def get_order_by_external_order_id(self, external_order_id: str) -> PersistedOrder | None:
+        with self._postgres_client.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    order_id,
+                    symbol,
+                    side,
+                    quantity,
+                    broker,
+                    current_status,
+                    external_order_id,
+                    correlation_id,
+                    idempotency_key,
+                    latest_message,
+                    last_updated_at
+                FROM execution_orders
+                WHERE external_order_id = %s
+                ORDER BY last_updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                (external_order_id,),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        return PersistedOrder(
+            order_id=row[0],
+            symbol=row[1],
+            side=row[2],
+            quantity=row[3],
+            broker=row[4],
+            current_status=row[5],
+            external_order_id=row[6],
+            correlation_id=row[7],
+            idempotency_key=row[8],
+            latest_message=row[9],
+            last_updated_at=row[10],
+        )
+
     def get_order_by_idempotency_key(self, idempotency_key: str) -> PersistedOrder | None:
         with self._postgres_client.cursor() as cur:
             cur.execute(

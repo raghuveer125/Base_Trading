@@ -17,10 +17,15 @@ from services.execution_service.app.order_state_machine import OrderStateMachine
 from services.execution_service.app.persistence import OrderPersistenceRepository
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.signal_reader import ApprovedSignalReader
+from services.execution_service.app.update_consumer import BrokerUpdateConsumer, BrokerUpdateEnvelope
 from shared.config.settings import Settings
 
 
 class DuplicateOrderSubmissionError(ValueError):
+    pass
+
+
+class UnknownBrokerUpdateOrderError(KeyError):
     pass
 
 
@@ -34,6 +39,7 @@ class ExecutionService:
         lifecycle_store: InMemoryOrderLifecycleStore | None = None,
         state_machine: OrderStateMachine | None = None,
         persistence_repository: OrderPersistenceRepository | None = None,
+        update_consumer: BrokerUpdateConsumer | None = None,
     ) -> None:
         self._settings = settings
         self._signal_reader = signal_reader
@@ -42,6 +48,7 @@ class ExecutionService:
         self._lifecycle_store = lifecycle_store or InMemoryOrderLifecycleStore()
         self._state_machine = state_machine or OrderStateMachine()
         self._persistence_repository = persistence_repository
+        self._update_consumer = update_consumer or BrokerUpdateConsumer()
         self._orders_prepared = 0
         self._last_prepared_at: datetime | None = None
 
@@ -121,6 +128,28 @@ class ExecutionService:
         seed = correlation_id or request_symbol
         normalized = seed.replace(":", "_").replace("|", "_")
         return f"ord-{normalized}-{uuid4().hex[:8]}"
+
+    def _resolve_order_id_for_update(self, envelope: BrokerUpdateEnvelope) -> str:
+        if envelope.order_id:
+            if self._lifecycle_store.exists(envelope.order_id):
+                return envelope.order_id
+            if self._persistence_repository is not None:
+                persisted = self._persistence_repository.get_order(envelope.order_id)
+                if persisted is not None:
+                    return persisted.order_id
+
+        if envelope.external_order_id:
+            stored = self._lifecycle_store.find_by_external_order_id(envelope.external_order_id)
+            if stored is not None:
+                return stored.order_id
+            if self._persistence_repository is not None:
+                persisted = self._persistence_repository.get_order_by_external_order_id(envelope.external_order_id)
+                if persisted is not None:
+                    return persisted.order_id
+
+        raise UnknownBrokerUpdateOrderError(
+            f"Unable to resolve order for broker update: order_id={envelope.order_id}, external_order_id={envelope.external_order_id}"
+        )
 
     def submit_order_request(self, request: BrokerPlaceOrderRequest, submit_message: str) -> BrokerPlaceOrderResponse:
         duplicate_order_id = self._find_duplicate_order_id(request.idempotency_key)
@@ -247,6 +276,25 @@ class ExecutionService:
         )
         self._persist_event(order_id)
         return self._lifecycle_store.get_history(order_id)[-1]
+
+    def consume_broker_update(
+        self,
+        payload: dict[str, object],
+        *,
+        source: str = "api",
+    ) -> OrderEventView:
+        envelope = self._update_consumer.normalize_update(payload, source=source)
+        resolved_order_id = self._resolve_order_id_for_update(envelope)
+        merged_payload = dict(envelope.payload)
+        merged_payload["update_source"] = envelope.source
+        merged_payload["received_at"] = envelope.received_at.isoformat()
+        if envelope.external_order_id:
+            merged_payload["external_order_id"] = envelope.external_order_id
+        return self.apply_broker_update(
+            order_id=resolved_order_id,
+            broker_status=envelope.broker_status,
+            raw_payload=merged_payload,
+        )
 
     def list_order_lifecycle(self) -> list[OrderLifecycleView]:
         if self._persistence_repository is not None:

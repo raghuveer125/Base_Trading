@@ -6,8 +6,9 @@ from services.execution_service.app.models import BrokerPlaceOrderRequest, Broke
 from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine
 from services.execution_service.app.persistence import OrderPersistenceRepository
 from services.execution_service.app.processor import ExecutionProcessor
-from services.execution_service.app.service import ExecutionService
+from services.execution_service.app.service import ExecutionService, UnknownBrokerUpdateOrderError
 from services.execution_service.app.signal_reader import ApprovedSignalReader
+from services.execution_service.app.update_consumer import BrokerUpdateConsumer
 from services.indicator_engine.app.repository import IndicatorRepository
 from services.risk_service.app.processor import RiskProcessor
 from services.risk_service.app.signal_reader import StrategySignalReader
@@ -20,6 +21,7 @@ app = FastAPI(title="execution_service", version="0.1.0")
 
 _LIFECYCLE_STORE = InMemoryOrderLifecycleStore()
 _STATE_MACHINE = OrderStateMachine()
+_UPDATE_CONSUMER = BrokerUpdateConsumer()
 
 
 def _build_persistence_repository(settings) -> OrderPersistenceRepository | None:
@@ -58,6 +60,7 @@ def build_execution_service() -> ExecutionService:
         lifecycle_store=_LIFECYCLE_STORE,
         state_machine=_STATE_MACHINE,
         persistence_repository=persistence_repository,
+        update_consumer=_UPDATE_CONSUMER,
     )
 
 
@@ -72,6 +75,7 @@ def build_lifecycle_only_service() -> ExecutionService:
         lifecycle_store=_LIFECYCLE_STORE,
         state_machine=_STATE_MACHINE,
         persistence_repository=persistence_repository,
+        update_consumer=_UPDATE_CONSUMER,
     )
 
 
@@ -222,7 +226,6 @@ def place_first() -> dict[str, object]:
 
 @app.post("/execution-service/broker/place-test")
 def place_test() -> dict[str, object]:
-    settings = get_settings()
     request = BrokerPlaceOrderRequest(
         symbol="NSE:SBIN-EQ",
         side="BUY",
@@ -307,5 +310,21 @@ def apply_broker_update(order_id: str, payload: dict[str, object]) -> dict[str, 
     return {
         "service": "execution_service",
         "order_id": order_id,
+        "event": event.model_dump(mode="json"),
+    }
+
+
+@app.post("/execution-service/broker/consume-update")
+def consume_broker_update(payload: dict[str, object]) -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    try:
+        event = service.consume_broker_update(payload, source="api")
+    except UnknownBrokerUpdateOrderError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (InvalidOrderTransition, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "service": "execution_service",
         "event": event.model_dump(mode="json"),
     }

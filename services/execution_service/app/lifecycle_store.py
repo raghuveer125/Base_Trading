@@ -58,6 +58,12 @@ class InMemoryOrderLifecycleStore:
     def get(self, order_id: str) -> StoredOrder:
         return self._orders[order_id]
 
+    def find_by_external_order_id(self, external_order_id: str) -> StoredOrder | None:
+        for stored in self._orders.values():
+            if stored.external_order_id == external_order_id:
+                return stored
+        return None
+
     def append_event(self, order_id: str, event: OrderEvent, external_order_id: str | None = None) -> StoredOrder:
         stored = self._orders[order_id]
         stored.current_status = event.to_status

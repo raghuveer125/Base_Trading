@@ -722,3 +722,34 @@
   * Output verified
   * Docs updated
 
+# Item 28 — Broker order update consumer
+## Checklist
+
+  * Add broker update consumer module
+  * Normalize incoming broker update payloads
+  * Resolve order by internal order id or external order id
+  * Add service method for broker update consumption
+  * Merge update metadata into stored raw payload
+  * Persist consumed broker lifecycle updates
+  * Add API endpoint for consumed broker updates
+  * Add lookup by external order id in lifecycle store
+  * Add lookup by external order id in persistence layer
+  * Add unit tests for broker update consumption
+  * Add API tests for consume-update endpoint
+  * Verify tests pass
+  * Verify external-order-id update path works
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Consumer added
+  * Payload normalization added
+  * Order resolution added
+  * Persistence preserved
+  * Tests added
+  * Update path verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+
