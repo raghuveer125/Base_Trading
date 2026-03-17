@@ -1,0 +1,97 @@
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from services.bar_builder.app.cache_writer import BarBuilderCacheWriter
+from services.bar_builder.app.state_store import InMemoryBarStateStore
+from shared.config.settings import Settings
+from shared.models import BarEvent
+from shared.redis.client import RedisStateClient
+
+
+def build_settings() -> Settings:
+    return Settings(
+        APP_ENV="local",
+        APP_NAME="projectX",
+        LOG_LEVEL="INFO",
+        POSTGRES_HOST="localhost",
+        POSTGRES_PORT=5432,
+        POSTGRES_DB="projectx",
+        POSTGRES_USER="projectx",
+        POSTGRES_PASSWORD="changeme",
+        REDIS_HOST="localhost",
+        REDIS_PORT=6379,
+        REDIS_ENABLED=False,
+        REDIS_KEY_PREFIX="projectx",
+        KAFKA_BOOTSTRAP_SERVERS="localhost:9092",
+        KAFKA_TOPIC_TICKS="md.raw.tick",
+        KAFKA_TOPIC_BARS_1M="md.bar.1m",
+        KAFKA_TOPIC_BARS_1M_CLOSED="md.bar.1m.closed",
+        KAFKA_CLIENT_ID="projectx-mdg",
+        KAFKA_ENABLED=False,
+        KAFKA_AUTO_CREATE_TOPICS=False,
+        KAFKA_TOPIC_PARTITIONS=1,
+        KAFKA_TOPIC_REPLICATION_FACTOR=1,
+        KAFKA_CONSUMER_GROUP_BAR_BUILDER="projectx-bar-builder",
+        KAFKA_CONSUMER_AUTO_OFFSET_RESET="earliest",
+        FYERS_CLIENT_ID="client_id",
+        FYERS_SECRET_KEY="secret_key",
+        FYERS_REDIRECT_URI="http://localhost/callback",
+        FYERS_ACCESS_TOKEN="token",
+        AUTH_SESSION_FILE="data/auth/session.json",
+        AUTH_REQUEST_TIMEOUT_SECONDS=10,
+        AUTH_VALIDATE_ON_STARTUP=False,
+        AUTH_SERVICE_MODE="bootstrap",
+        MDG_MODE="stub",
+        MDG_SYMBOLS="NSE:SBIN-EQ,NSE:RELIANCE-EQ",
+        MDG_EXCHANGE="NSE",
+        MDG_EMIT_INTERVAL_SECONDS=1,
+        MDG_API_HOST="127.0.0.1",
+        MDG_API_PORT=8002,
+        BAR_BUILDER_MODE="stub",
+        BAR_BUILDER_API_HOST="127.0.0.1",
+        BAR_BUILDER_API_PORT=8003,
+        BAR_BUILDER_TIMEFRAME="1m",
+        BAR_BUILDER_CLOSE_ON_NEXT_MINUTE=True,
+    )
+
+
+def build_bar_event() -> BarEvent:
+    return BarEvent.create(
+        source="bar_builder",
+        symbol="NSE:SBIN-EQ",
+        exchange="NSE",
+        timeframe="1m",
+        bar_start_time=datetime(2026, 3, 17, 17, 0, tzinfo=UTC),
+        bar_end_time=datetime(2026, 3, 17, 17, 1, tzinfo=UTC),
+        open_price=Decimal("820.10"),
+        high_price=Decimal("821.00"),
+        low_price=Decimal("819.90"),
+        close_price=Decimal("820.50"),
+        volume=100,
+        source_detail="test",
+        revision=1,
+    )
+
+
+def test_cache_writer_methods_do_not_fail_when_redis_disabled() -> None:
+    settings = build_settings()
+    redis_client = RedisStateClient(settings=settings)
+    redis_client.connect()
+
+    writer = BarBuilderCacheWriter(
+        settings=settings,
+        redis_client=redis_client,
+    )
+
+    state_store = InMemoryBarStateStore()
+    bar_event = build_bar_event()
+    state_store.set("test", bar_event)
+
+    writer.cache_open_bar(bar_event)
+    writer.cache_closed_bar(bar_event)
+    writer.cache_status(
+        state_store=state_store,
+        consumed_count=1,
+        produced_count=1,
+        closed_count=0,
+    )
