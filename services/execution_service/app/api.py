@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from services.execution_service.app.models import BrokerPlaceOrderRequest
 from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.models import BrokerPlaceOrderResponse
 from services.execution_service.app.processor import ExecutionProcessor
@@ -168,4 +169,37 @@ def place_first() -> dict[str, object]:
         "external_order_id": result.external_order_id,
         "processed_at": result.processed_at.isoformat(),
         "message": result.message,
+        "correlation_id": result.correlation_id,
+        "idempotency_key": result.idempotency_key,
+        "raw_response": result.raw_response,
+    }
+@app.post("/execution-service/broker/place-test")
+def place_test() -> dict[str, object]:
+    settings = get_settings()
+    broker_adapter = build_broker_adapter(settings=settings)
+
+    request = BrokerPlaceOrderRequest(
+        symbol="NSE:SBIN-EQ",
+        side="BUY",
+        quantity=1,
+        order_type="MARKET",
+        product="INTRADAY",
+        validity="DAY",
+        correlation_id="manual-test-correlation",
+        idempotency_key="manual-test-idempotency",
+    )
+
+    result = broker_adapter.place_order(request)
+
+    return {
+        "broker": result.broker,
+        "adapter": result.adapter,
+        "accepted": result.accepted,
+        "status": result.status,
+        "external_order_id": result.external_order_id,
+        "processed_at": result.processed_at.isoformat(),
+        "message": result.message,
+        "correlation_id": result.correlation_id,
+        "idempotency_key": result.idempotency_key,
+        "raw_response": result.raw_response,
     }

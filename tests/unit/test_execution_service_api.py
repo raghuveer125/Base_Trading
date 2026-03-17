@@ -57,12 +57,14 @@ class FakeExecutionService:
             adapter="fyers",
             accepted=True,
             status="accepted",
-            external_order_id="stub-NSE_SBIN-EQ-buy-1",
+            external_order_id="stub-NSE_SBIN-EQ-buy-1-test",
             message="Stub broker accepted order",
+            correlation_id="NSE:SBIN-EQ|1m|2026-03-18T12:00:00+00:00",
+            idempotency_key="aaaaaaaaaaaaaaaaaaaaaaaa",
+            raw_response={"symbol": "NSE:SBIN-EQ"},
         )
 
 
-app.dependency_overrides = {}
 execution_api.build_execution_service = lambda: FakeExecutionService()
 
 client = TestClient(app)
@@ -111,3 +113,4 @@ def test_place_first_endpoint() -> None:
     assert body["broker"] == "fyers_stub"
     assert body["adapter"] == "fyers"
     assert body["status"] == "accepted"
+    assert body["idempotency_key"] == "aaaaaaaaaaaaaaaaaaaaaaaa"

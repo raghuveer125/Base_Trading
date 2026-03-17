@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 from services.execution_service.app.brokers.factory import build_broker_adapter
+from services.execution_service.app.models import BrokerPlaceOrderRequest
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionService
 from shared.config.settings import Settings
@@ -95,6 +96,17 @@ def test_execution_processor_prepares_order() -> None:
     assert orders[0]["status"] == "prepared"
 
 
+def test_execution_processor_builds_request_with_idempotency() -> None:
+    processor = ExecutionProcessor(settings=build_settings())
+    order = processor.prepare_orders(FakeApprovedSignalReader().load_approved_signals())[0]
+    request = processor.build_broker_request(order)
+    assert request.side == "BUY"
+    assert request.quantity == 1
+    assert request.idempotency_key is not None
+    assert len(request.idempotency_key) == 24
+    assert request.correlation_id is not None
+
+
 def test_execution_service_prepares_once() -> None:
     settings = build_settings()
     service = ExecutionService(
@@ -126,16 +138,28 @@ def test_execution_service_stub_broker_accepts_first_order() -> None:
     assert result.accepted is True
     assert result.status == "accepted"
     assert result.external_order_id is not None
+    assert result.idempotency_key is not None
 
 
-def test_execution_service_live_broker_returns_not_implemented() -> None:
+def test_execution_request_validates_side() -> None:
+    try:
+        BrokerPlaceOrderRequest(symbol="NSE:SBIN-EQ", side="HOLD", quantity=1)
+    except Exception as exc:
+        assert "side must be BUY or SELL" in str(exc)
+    else:
+        raise AssertionError("Expected invalid side validation error")
+
+
+def test_execution_live_broker_error_when_sdk_missing_or_call_fails() -> None:
     settings = build_settings("fyers_live")
-    service = ExecutionService(
-        settings=settings,
-        signal_reader=FakeApprovedSignalReader(),
-        processor=ExecutionProcessor(settings=settings),
-        broker_adapter=build_broker_adapter(settings=settings),
+    adapter = build_broker_adapter(settings=settings)
+    request = BrokerPlaceOrderRequest(
+        symbol="NSE:SBIN-EQ",
+        side="BUY",
+        quantity=1,
+        correlation_id="test-correlation",
+        idempotency_key="test-idempotency",
     )
-    result = service.place_first_prepared_order_once()
+    result = adapter.place_order(request)
     assert result.accepted is False
-    assert result.status == "not_implemented"
+    assert result.status in {"accepted", "rejected", "error"}

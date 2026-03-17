@@ -594,3 +594,35 @@
   * Output verified
   * Docs updated
 
+# Item 24 — Order command to broker order placement
+## Checklist
+
+  * Add broker request validation
+  * Add idempotency key generation
+  * Add correlation id on order submission
+  * Add FYERS payload mapping
+  * Add stub broker submission payload echo
+  * Add live FYERS place-order call
+  * Add response normalization
+  * Add live submission error handling
+  * Add processor tests for idempotency
+  * Add broker request validation tests
+  * Add API test coverage for broker response fields
+  * Verify tests pass
+  * Verify stub path returns accepted with idempotency key
+  * Verify live path returns accepted or controlled error
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Request validation added
+  * Idempotency added
+  * Logs added
+  * Test added
+  * Stub mode verified
+  * Live mode path implemented
+  * Failure case checked
+  * Output verified
+  * Docs updated
+
