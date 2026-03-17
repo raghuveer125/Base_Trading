@@ -4,6 +4,7 @@ import os
 import uvicorn
 
 from services.execution_service.app.api import app
+from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionService
 from services.execution_service.app.signal_reader import ApprovedSignalReader
@@ -20,12 +21,12 @@ from shared.postgres.client import PostgresClient
 async def run_stub_mode() -> None:
     settings = get_settings()
     logger = get_logger("execution_service")
-
     postgres_client = PostgresClient(settings=settings)
     postgres_client.connect()
-
     repository = IndicatorRepository(postgres_client=postgres_client)
     repository.ensure_table()
+
+    broker_adapter = build_broker_adapter(settings=settings)
 
     service = ExecutionService(
         settings=settings,
@@ -37,7 +38,10 @@ async def run_stub_mode() -> None:
             risk_processor=RiskProcessor(settings=settings),
         ),
         processor=ExecutionProcessor(settings=settings),
+        broker_adapter=broker_adapter,
     )
+
+    broker_health = broker_adapter.health_check()
 
     logger.info(
         "service_started",
@@ -45,6 +49,7 @@ async def run_stub_mode() -> None:
         env=settings.app_env,
         mode=settings.execution_service_mode,
         broker=settings.execution_service_broker,
+        broker_ready=broker_health.ready,
         postgres_enabled=settings.postgres_enabled,
     )
 
@@ -61,7 +66,6 @@ async def run_stub_mode() -> None:
 def run_api_mode() -> None:
     settings = get_settings()
     logger = get_logger("execution_service")
-
     logger.info(
         "execution_service_api_starting",
         service="execution_service",
@@ -71,7 +75,6 @@ def run_api_mode() -> None:
         broker=settings.execution_service_broker,
         postgres_enabled=settings.postgres_enabled,
     )
-
     uvicorn.run(
         app,
         host=settings.execution_service_api_host,
@@ -83,11 +86,9 @@ def run_api_mode() -> None:
 def main() -> None:
     configure_logging()
     mode = os.getenv("EXECUTION_SERVICE_MODE", "stub").strip().lower()
-
     if mode == "api":
         run_api_mode()
         return
-
     asyncio.run(run_stub_mode())
 
 

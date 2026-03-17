@@ -564,3 +564,33 @@
 - [x] Failure case checked
 - [x] Output verified
 - [x] Docs updated
+
+# Item 23 — Broker adapter skeleton for FYERS
+## Checklist
+
+  * Add broker adapter interface
+  * Add FYERS broker adapter skeleton
+  * Add broker factory
+  * Add broker health model
+  * Add place-order request/response models
+  * Add broker health endpoint
+  * Add stub and live broker modes
+  * Add execution service broker wiring
+  * Add broker adapter unit tests
+  * Add broker API tests
+  * Verify tests pass
+  * Verify stub broker accepts test order
+  * Verify live broker returns skeleton response
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Config reused
+  * Logs added
+  * Test added
+  * Local run successful
+  * Failure case checked
+  * Output verified
+  * Docs updated
+

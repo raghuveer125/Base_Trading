@@ -1,11 +1,12 @@
 from datetime import UTC, datetime
 
+from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionService
 from shared.config.settings import Settings
 
 
-def build_settings() -> Settings:
+def build_settings(execution_broker: str = "fyers_stub") -> Settings:
     return Settings(
         APP_ENV="local",
         APP_NAME="projectX",
@@ -68,7 +69,7 @@ def build_settings() -> Settings:
         EXECUTION_SERVICE_MODE="stub",
         EXECUTION_SERVICE_API_HOST="127.0.0.1",
         EXECUTION_SERVICE_API_PORT=8007,
-        EXECUTION_SERVICE_BROKER="fyers_stub",
+        EXECUTION_SERVICE_BROKER=execution_broker,
     )
 
 
@@ -88,7 +89,6 @@ class FakeApprovedSignalReader:
 def test_execution_processor_prepares_order() -> None:
     processor = ExecutionProcessor(settings=build_settings())
     orders = processor.prepare_orders(FakeApprovedSignalReader().load_approved_signals())
-
     assert len(orders) == 1
     assert orders[0]["side"] == "BUY"
     assert orders[0]["broker"] == "fyers_stub"
@@ -96,17 +96,46 @@ def test_execution_processor_prepares_order() -> None:
 
 
 def test_execution_service_prepares_once() -> None:
+    settings = build_settings()
     service = ExecutionService(
-        settings=build_settings(),
+        settings=settings,
         signal_reader=FakeApprovedSignalReader(),
-        processor=ExecutionProcessor(settings=build_settings()),
+        processor=ExecutionProcessor(settings=settings),
+        broker_adapter=build_broker_adapter(settings=settings),
     )
-
     orders = service.prepare_once()
     status = service.get_status()
-
     assert len(orders) == 1
     assert status.service == "execution_service"
     assert status.approved_loaded == 1
     assert status.orders_prepared == 1
     assert status.broker == "fyers_stub"
+    assert status.broker_adapter == "fyers"
+    assert status.broker_ready is True
+
+
+def test_execution_service_stub_broker_accepts_first_order() -> None:
+    settings = build_settings("fyers_stub")
+    service = ExecutionService(
+        settings=settings,
+        signal_reader=FakeApprovedSignalReader(),
+        processor=ExecutionProcessor(settings=settings),
+        broker_adapter=build_broker_adapter(settings=settings),
+    )
+    result = service.place_first_prepared_order_once()
+    assert result.accepted is True
+    assert result.status == "accepted"
+    assert result.external_order_id is not None
+
+
+def test_execution_service_live_broker_returns_not_implemented() -> None:
+    settings = build_settings("fyers_live")
+    service = ExecutionService(
+        settings=settings,
+        signal_reader=FakeApprovedSignalReader(),
+        processor=ExecutionProcessor(settings=settings),
+        broker_adapter=build_broker_adapter(settings=settings),
+    )
+    result = service.place_first_prepared_order_once()
+    assert result.accepted is False
+    assert result.status == "not_implemented"
