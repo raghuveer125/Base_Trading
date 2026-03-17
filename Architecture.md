@@ -660,3 +660,36 @@
   * Output verified
   * Docs updated
 
+# Item 26 — Order persistence in PostgreSQL
+## Checklist
+
+  * Add execution orders table
+  * Add execution order events table
+  * Add repository layer for orders and events
+  * Persist order snapshot on lifecycle changes
+  * Persist every lifecycle event
+  * Add fetch order by id support
+  * Add fetch order history support
+  * Add list orders from persistence layer
+  * Add active order count from persistence layer
+  * Wire persistence into execution service
+  * Keep in-memory lifecycle as hot runtime cache
+  * Add persistence-aware service tests
+  * Add API tests for persistence-backed endpoints
+  * Verify tests pass
+  * Verify manual test orders persist
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Tables added
+  * Repository added
+  * Persistence wired
+  * Logs preserved
+  * Tests added
+  * Persistence path verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+

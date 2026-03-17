@@ -1,14 +1,16 @@
 from datetime import UTC, datetime
 
+
 from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
-from services.execution_service.app.models import BrokerPlaceOrderRequest
+from services.execution_service.app.models import BrokerPlaceOrderRequest, BrokerPlaceOrderResponse
 from services.execution_service.app.order_state_machine import (
     InvalidOrderTransition,
     OrderStateMachine,
     OrderStatus,
     normalize_broker_status,
 )
+from services.execution_service.app.persistence import OrderPersistenceRepository
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionService
 from shared.config.settings import Settings
@@ -94,6 +96,53 @@ class FakeApprovedSignalReader:
         ]
 
 
+class FakePersistenceRepository:
+    def __init__(self) -> None:
+        self.orders: dict[str, dict] = {}
+        self.events: list = []
+
+    def upsert_order(
+        self,
+        *,
+        order_id: str,
+        symbol: str,
+        side: str,
+        quantity: int,
+        broker: str,
+        current_status,
+        external_order_id,
+        correlation_id,
+        idempotency_key,
+        latest_message,
+        last_updated_at,
+    ) -> None:
+        self.orders[order_id] = {
+            "order_id": order_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "broker": broker,
+            "current_status": current_status.value,
+            "external_order_id": external_order_id,
+            "correlation_id": correlation_id,
+            "idempotency_key": idempotency_key,
+            "latest_message": latest_message,
+            "last_updated_at": last_updated_at,
+        }
+
+    def insert_event(self, event) -> None:
+        self.events.append(event)
+
+    def list_orders(self):
+        return []
+
+    def get_history(self, order_id: str):
+        return []
+
+    def active_order_count(self) -> int:
+        return len([o for o in self.orders.values() if o["current_status"] not in {"filled", "cancelled", "rejected"}])
+
+
 def test_execution_processor_prepares_order() -> None:
     processor = ExecutionProcessor(settings=build_settings())
     orders = processor.prepare_orders(FakeApprovedSignalReader().load_approved_signals())
@@ -136,6 +185,7 @@ def test_execution_service_prepares_once() -> None:
 def test_execution_service_stub_broker_accepts_first_order_and_creates_lifecycle() -> None:
     settings = build_settings("fyers_stub")
     store = InMemoryOrderLifecycleStore()
+    repo = FakePersistenceRepository()
     service = ExecutionService(
         settings=settings,
         signal_reader=FakeApprovedSignalReader(),
@@ -143,9 +193,10 @@ def test_execution_service_stub_broker_accepts_first_order_and_creates_lifecycle
         broker_adapter=build_broker_adapter(settings=settings),
         lifecycle_store=store,
         state_machine=OrderStateMachine(),
+        persistence_repository=repo,
     )
     result = service.place_first_prepared_order_once()
-    orders = service.list_order_lifecycle()
+    orders = store.list_orders()
 
     assert result.accepted is True
     assert result.status == "accepted"
@@ -154,6 +205,8 @@ def test_execution_service_stub_broker_accepts_first_order_and_creates_lifecycle
     assert len(orders) == 1
     assert orders[0].current_status == OrderStatus.ACKNOWLEDGED
     assert orders[0].history_count == 2
+    assert len(repo.events) == 2
+    assert len(repo.orders) == 1
 
 
 def test_execution_request_validates_side() -> None:
@@ -216,6 +269,7 @@ def test_normalize_broker_status() -> None:
 def test_apply_broker_update_moves_order_to_filled() -> None:
     settings = build_settings("fyers_stub")
     store = InMemoryOrderLifecycleStore()
+    repo = FakePersistenceRepository()
     service = ExecutionService(
         settings=settings,
         signal_reader=FakeApprovedSignalReader(),
@@ -223,9 +277,10 @@ def test_apply_broker_update_moves_order_to_filled() -> None:
         broker_adapter=build_broker_adapter(settings=settings),
         lifecycle_store=store,
         state_machine=OrderStateMachine(),
+        persistence_repository=repo,
     )
     service.place_first_prepared_order_once()
-    order = service.list_order_lifecycle()[0]
+    order = store.list_orders()[0]
 
     open_event = service.apply_broker_update(
         order_id=order.order_id,
@@ -242,3 +297,35 @@ def test_apply_broker_update_moves_order_to_filled() -> None:
     assert fill_event.to_status == OrderStatus.FILLED
     assert fill_event.filled_quantity == 1
     assert fill_event.average_price == 600.25
+    assert len(repo.events) == 4
+
+
+def test_register_manual_test_order_persists_lifecycle() -> None:
+    settings = build_settings("fyers_stub")
+    store = InMemoryOrderLifecycleStore()
+    repo = FakePersistenceRepository()
+    service = ExecutionService(
+        settings=settings,
+        signal_reader=None,
+        processor=ExecutionProcessor(settings=settings),
+        broker_adapter=build_broker_adapter(settings=settings),
+        lifecycle_store=store,
+        state_machine=OrderStateMachine(),
+        persistence_repository=repo,
+    )
+
+    response = BrokerPlaceOrderResponse(
+        broker="fyers_stub",
+        adapter="fyers",
+        accepted=True,
+        status="accepted",
+        external_order_id="ext-1",
+        message="accepted",
+        correlation_id="manual-test-correlation",
+        idempotency_key="manual-test-idempotency",
+        raw_response={"symbol": "NSE:SBIN-EQ"},
+    )
+    order_id = service.register_manual_test_order(response)
+
+    assert order_id in repo.orders
+    assert len(repo.events) == 2

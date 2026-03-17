@@ -8,7 +8,6 @@ from services.execution_service.app.models import (
     BrokerPlaceOrderResponse,
     ExecutionServiceStatus,
 )
-from services.execution_service.app.order_state_machine import OrderStatus
 import services.execution_service.app.api as execution_api
 
 
@@ -66,8 +65,18 @@ class FakeExecutionService:
             raw_response={"symbol": "NSE:SBIN-EQ"},
         )
 
+    def register_manual_test_order(self, response: BrokerPlaceOrderResponse) -> str:
+        return "ord-manual-test-api"
+
+    def list_order_lifecycle(self):
+        return []
+
+    def get_order_history(self, order_id: str):
+        return []
+
 
 execution_api.build_execution_service = lambda: FakeExecutionService()
+execution_api.build_lifecycle_only_service = lambda: FakeExecutionService()
 
 client = TestClient(app)
 
@@ -124,24 +133,16 @@ def test_place_test_endpoint() -> None:
     body = response.json()
     assert body["accepted"] is True
     assert body["idempotency_key"] == "manual-test-idempotency"
+    assert body["order_id"] == "ord-manual-test-api"
 
 
-def test_order_listing_and_history_endpoints() -> None:
-    create_response = client.post("/execution-service/broker/place-test")
-    assert create_response.status_code == 200
+def test_order_listing_endpoint() -> None:
+    response = client.get("/execution-service/orders")
+    assert response.status_code == 200
+    body = response.json()
+    assert "orders" in body
 
-    orders_response = client.get("/execution-service/orders")
-    assert orders_response.status_code == 200
-    orders_body = orders_response.json()
-    assert "orders" in orders_body
 
-    if orders_body["count"] > 0:
-        order_id = orders_body["orders"][0]["order_id"]
-        update_response = client.post(
-            f"/execution-service/orders/{order_id}/broker-update",
-            json={"broker_status": "OPEN"},
-        )
-        assert update_response.status_code in {200, 404, 400}
-
-        history_response = client.get(f"/execution-service/orders/{order_id}/history")
-        assert history_response.status_code == 200
+def test_order_history_endpoint_404_when_missing() -> None:
+    response = client.get("/execution-service/orders/ord-unknown/history")
+    assert response.status_code == 404

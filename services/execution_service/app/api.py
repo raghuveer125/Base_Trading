@@ -1,10 +1,10 @@
 from fastapi import FastAPI, HTTPException
 
-from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine, OrderStatus
 from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.models import BrokerPlaceOrderRequest, BrokerPlaceOrderResponse
-# from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine
+from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine, OrderStatus
+from services.execution_service.app.persistence import OrderPersistenceRepository
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionService
 from services.execution_service.app.signal_reader import ApprovedSignalReader
@@ -22,12 +22,28 @@ _LIFECYCLE_STORE = InMemoryOrderLifecycleStore()
 _STATE_MACHINE = OrderStateMachine()
 
 
+def _build_persistence_repository(settings) -> OrderPersistenceRepository | None:
+    if not settings.postgres_enabled:
+        return None
+    try:
+        postgres_client = PostgresClient(settings=settings)
+        postgres_client.connect()
+        repository = OrderPersistenceRepository(postgres_client=postgres_client)
+        repository.ensure_tables()
+        return repository
+    except Exception:
+        return None
+
+
 def build_execution_service() -> ExecutionService:
     settings = get_settings()
+    persistence_repository = _build_persistence_repository(settings)
+
     postgres_client = PostgresClient(settings=settings)
     postgres_client.connect()
     repository = IndicatorRepository(postgres_client=postgres_client)
     repository.ensure_table()
+
     return ExecutionService(
         settings=settings,
         signal_reader=ApprovedSignalReader(
@@ -41,6 +57,21 @@ def build_execution_service() -> ExecutionService:
         broker_adapter=build_broker_adapter(settings=settings),
         lifecycle_store=_LIFECYCLE_STORE,
         state_machine=_STATE_MACHINE,
+        persistence_repository=persistence_repository,
+    )
+
+
+def build_lifecycle_only_service() -> ExecutionService:
+    settings = get_settings()
+    persistence_repository = _build_persistence_repository(settings)
+    return ExecutionService(
+        settings=settings,
+        signal_reader=None,
+        processor=ExecutionProcessor(settings=settings),
+        broker_adapter=build_broker_adapter(settings=settings),
+        lifecycle_store=_LIFECYCLE_STORE,
+        state_machine=_STATE_MACHINE,
+        persistence_repository=persistence_repository,
     )
 
 
@@ -185,10 +216,10 @@ def place_first() -> dict[str, object]:
         "idempotency_key": result.idempotency_key,
         "raw_response": result.raw_response,
     }
+
+
 @app.post("/execution-service/broker/place-test")
 def place_test() -> dict[str, object]:
-    from uuid import uuid4
-
     settings = get_settings()
     broker_adapter = build_broker_adapter(settings=settings)
 
@@ -202,62 +233,13 @@ def place_test() -> dict[str, object]:
         correlation_id="manual-test-correlation",
         idempotency_key="manual-test-idempotency",
     )
-
-    internal_order_id = f"ord-manual-test-{uuid4().hex[:8]}"
-
-    _LIFECYCLE_STORE.create_order(
-        order_id=internal_order_id,
-        symbol=request.symbol,
-        side=request.side,
-        quantity=request.quantity,
-        broker=settings.execution_service_broker,
-        correlation_id=request.correlation_id,
-        idempotency_key=request.idempotency_key,
-    )
-
-    submitted_event = _STATE_MACHINE.transition(
-        order_id=internal_order_id,
-        current=OrderStatus.CREATED,
-        target=OrderStatus.SUBMITTED,
-        event_type="submit_request",
-        message="Manual test order submitted to broker adapter",
-    )
-    _LIFECYCLE_STORE.append_event(internal_order_id, submitted_event)
-
     result = broker_adapter.place_order(request)
 
-    if result.accepted:
-        ack_event = _STATE_MACHINE.transition(
-            order_id=internal_order_id,
-            current=OrderStatus.SUBMITTED,
-            target=OrderStatus.ACKNOWLEDGED,
-            event_type="broker_ack",
-            message=result.message,
-            raw_payload=result.raw_response,
-        )
-        _LIFECYCLE_STORE.append_event(
-            internal_order_id,
-            ack_event,
-            external_order_id=result.external_order_id,
-        )
-    else:
-        reject_target = OrderStatus.REJECTED if result.status in {"rejected", "empty"} else OrderStatus.ERROR
-        reject_event = _STATE_MACHINE.transition(
-            order_id=internal_order_id,
-            current=OrderStatus.SUBMITTED,
-            target=reject_target,
-            event_type="broker_reject",
-            message=result.message,
-            raw_payload=result.raw_response,
-        )
-        _LIFECYCLE_STORE.append_event(
-            internal_order_id,
-            reject_event,
-            external_order_id=result.external_order_id,
-        )
+    service = build_lifecycle_only_service()
+    order_id = service.register_manual_test_order(result)
 
     return {
-        "order_id": internal_order_id,
+        "order_id": order_id,
         "broker": result.broker,
         "adapter": result.adapter,
         "accepted": result.accepted,
@@ -270,21 +252,28 @@ def place_test() -> dict[str, object]:
         "raw_response": result.raw_response,
     }
 
+
 @app.get("/execution-service/orders")
 def list_orders() -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    orders = service.list_order_lifecycle()
     return {
         "service": "execution_service",
-        "count": len(_LIFECYCLE_STORE.list_orders()),
-        "orders": [order.model_dump(mode="json") for order in _LIFECYCLE_STORE.list_orders()],
+        "count": len(orders),
+        "orders": [order.model_dump(mode="json") for order in orders],
     }
 
 
 @app.get("/execution-service/orders/{order_id}/history")
 def order_history(order_id: str) -> dict[str, object]:
+    service = build_lifecycle_only_service()
     try:
-        history = _LIFECYCLE_STORE.get_history(order_id)
+        history = service.get_order_history(order_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown order_id: {order_id}") from exc
+
+    if not history:
+        raise HTTPException(status_code=404, detail=f"Unknown order_id: {order_id}")
 
     return {
         "service": "execution_service",
@@ -300,15 +289,7 @@ def apply_broker_update(order_id: str, payload: dict[str, object]) -> dict[str, 
     if not broker_status:
         raise HTTPException(status_code=400, detail="broker_status is required")
 
-    service = ExecutionService(
-        settings=get_settings(),
-        signal_reader=None,  # type: ignore[arg-type]
-        processor=ExecutionProcessor(settings=get_settings()),
-        broker_adapter=build_broker_adapter(settings=get_settings()),
-        lifecycle_store=_LIFECYCLE_STORE,
-        state_machine=_STATE_MACHINE,
-    )
-
+    service = build_lifecycle_only_service()
     try:
         event = service.apply_broker_update(
             order_id=order_id,
