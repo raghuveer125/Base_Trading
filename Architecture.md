@@ -626,3 +626,37 @@
   * Output verified
   * Docs updated
 
+# Item 25 — Order state machine and lifecycle tracking
+## Checklist
+
+  * Add internal order status enum
+  * Add allowed transition rules
+  * Add invalid transition guard
+  * Add broker status normalization
+  * Add lifecycle event model
+  * Add in-memory lifecycle store
+  * Track submitted to acknowledged flow
+  * Add broker update application flow
+  * Add order listing endpoint
+  * Add order history endpoint
+  * Add broker update simulation endpoint
+  * Add state machine unit tests
+  * Add lifecycle service tests
+  * Add API tests for lifecycle endpoints
+  * Verify tests pass
+  * Verify stub order moves through lifecycle
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * State machine added
+  * Transition guards added
+  * Broker normalization added
+  * Logs preserved
+  * Tests added
+  * Stub lifecycle verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+

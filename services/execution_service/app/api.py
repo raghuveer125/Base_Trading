@@ -1,8 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
-from services.execution_service.app.models import BrokerPlaceOrderRequest
+from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine, OrderStatus
 from services.execution_service.app.brokers.factory import build_broker_adapter
-from services.execution_service.app.models import BrokerPlaceOrderResponse
+from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
+from services.execution_service.app.models import BrokerPlaceOrderRequest, BrokerPlaceOrderResponse
+# from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionService
 from services.execution_service.app.signal_reader import ApprovedSignalReader
@@ -15,6 +17,9 @@ from shared.config.settings import get_settings
 from shared.postgres.client import PostgresClient
 
 app = FastAPI(title="execution_service", version="0.1.0")
+
+_LIFECYCLE_STORE = InMemoryOrderLifecycleStore()
+_STATE_MACHINE = OrderStateMachine()
 
 
 def build_execution_service() -> ExecutionService:
@@ -34,6 +39,8 @@ def build_execution_service() -> ExecutionService:
         ),
         processor=ExecutionProcessor(settings=settings),
         broker_adapter=build_broker_adapter(settings=settings),
+        lifecycle_store=_LIFECYCLE_STORE,
+        state_machine=_STATE_MACHINE,
     )
 
 
@@ -45,6 +52,7 @@ def health() -> dict[str, str | bool | int | None]:
 
     replay_ready = True
     approved_loaded = 0
+    active_order_count = _LIFECYCLE_STORE.active_order_count()
     message = "Execution service ready"
 
     try:
@@ -52,6 +60,7 @@ def health() -> dict[str, str | bool | int | None]:
         status = service.get_status()
         replay_ready = status.replay_ready
         approved_loaded = status.approved_loaded
+        active_order_count = status.active_order_count
     except Exception as exc:
         replay_ready = False
         message = f"Execution service degraded: replay storage unavailable ({exc.__class__.__name__})"
@@ -66,6 +75,7 @@ def health() -> dict[str, str | bool | int | None]:
         "replay_ready": replay_ready,
         "approved_loaded": approved_loaded,
         "orders_prepared": 0,
+        "active_order_count": active_order_count,
         "last_prepared_at": None,
         "message": message,
         "status": "ok" if broker_health.ready else "degraded",
@@ -90,6 +100,7 @@ def execution_status() -> dict[str, str | bool | int | None]:
             "replay_ready": status.replay_ready,
             "approved_loaded": status.approved_loaded,
             "orders_prepared": status.orders_prepared,
+            "active_order_count": status.active_order_count,
             "last_prepared_at": status.last_prepared_at.isoformat() if status.last_prepared_at else None,
             "message": status.message,
         }
@@ -104,6 +115,7 @@ def execution_status() -> dict[str, str | bool | int | None]:
             "replay_ready": False,
             "approved_loaded": 0,
             "orders_prepared": 0,
+            "active_order_count": _LIFECYCLE_STORE.active_order_count(),
             "last_prepared_at": None,
             "message": f"Execution service degraded: replay storage unavailable ({exc.__class__.__name__})",
         }
@@ -175,6 +187,8 @@ def place_first() -> dict[str, object]:
     }
 @app.post("/execution-service/broker/place-test")
 def place_test() -> dict[str, object]:
+    from uuid import uuid4
+
     settings = get_settings()
     broker_adapter = build_broker_adapter(settings=settings)
 
@@ -189,9 +203,61 @@ def place_test() -> dict[str, object]:
         idempotency_key="manual-test-idempotency",
     )
 
+    internal_order_id = f"ord-manual-test-{uuid4().hex[:8]}"
+
+    _LIFECYCLE_STORE.create_order(
+        order_id=internal_order_id,
+        symbol=request.symbol,
+        side=request.side,
+        quantity=request.quantity,
+        broker=settings.execution_service_broker,
+        correlation_id=request.correlation_id,
+        idempotency_key=request.idempotency_key,
+    )
+
+    submitted_event = _STATE_MACHINE.transition(
+        order_id=internal_order_id,
+        current=OrderStatus.CREATED,
+        target=OrderStatus.SUBMITTED,
+        event_type="submit_request",
+        message="Manual test order submitted to broker adapter",
+    )
+    _LIFECYCLE_STORE.append_event(internal_order_id, submitted_event)
+
     result = broker_adapter.place_order(request)
 
+    if result.accepted:
+        ack_event = _STATE_MACHINE.transition(
+            order_id=internal_order_id,
+            current=OrderStatus.SUBMITTED,
+            target=OrderStatus.ACKNOWLEDGED,
+            event_type="broker_ack",
+            message=result.message,
+            raw_payload=result.raw_response,
+        )
+        _LIFECYCLE_STORE.append_event(
+            internal_order_id,
+            ack_event,
+            external_order_id=result.external_order_id,
+        )
+    else:
+        reject_target = OrderStatus.REJECTED if result.status in {"rejected", "empty"} else OrderStatus.ERROR
+        reject_event = _STATE_MACHINE.transition(
+            order_id=internal_order_id,
+            current=OrderStatus.SUBMITTED,
+            target=reject_target,
+            event_type="broker_reject",
+            message=result.message,
+            raw_payload=result.raw_response,
+        )
+        _LIFECYCLE_STORE.append_event(
+            internal_order_id,
+            reject_event,
+            external_order_id=result.external_order_id,
+        )
+
     return {
+        "order_id": internal_order_id,
         "broker": result.broker,
         "adapter": result.adapter,
         "accepted": result.accepted,
@@ -202,4 +268,60 @@ def place_test() -> dict[str, object]:
         "correlation_id": result.correlation_id,
         "idempotency_key": result.idempotency_key,
         "raw_response": result.raw_response,
+    }
+
+@app.get("/execution-service/orders")
+def list_orders() -> dict[str, object]:
+    return {
+        "service": "execution_service",
+        "count": len(_LIFECYCLE_STORE.list_orders()),
+        "orders": [order.model_dump(mode="json") for order in _LIFECYCLE_STORE.list_orders()],
+    }
+
+
+@app.get("/execution-service/orders/{order_id}/history")
+def order_history(order_id: str) -> dict[str, object]:
+    try:
+        history = _LIFECYCLE_STORE.get_history(order_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown order_id: {order_id}") from exc
+
+    return {
+        "service": "execution_service",
+        "order_id": order_id,
+        "history_count": len(history),
+        "history": [event.model_dump(mode="json") for event in history],
+    }
+
+
+@app.post("/execution-service/orders/{order_id}/broker-update")
+def apply_broker_update(order_id: str, payload: dict[str, object]) -> dict[str, object]:
+    broker_status = str(payload.get("broker_status") or payload.get("status") or "").strip()
+    if not broker_status:
+        raise HTTPException(status_code=400, detail="broker_status is required")
+
+    service = ExecutionService(
+        settings=get_settings(),
+        signal_reader=None,  # type: ignore[arg-type]
+        processor=ExecutionProcessor(settings=get_settings()),
+        broker_adapter=build_broker_adapter(settings=get_settings()),
+        lifecycle_store=_LIFECYCLE_STORE,
+        state_machine=_STATE_MACHINE,
+    )
+
+    try:
+        event = service.apply_broker_update(
+            order_id=order_id,
+            broker_status=broker_status,
+            raw_payload=payload,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown order_id: {order_id}") from exc
+    except (InvalidOrderTransition, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "service": "execution_service",
+        "order_id": order_id,
+        "event": event.model_dump(mode="json"),
     }

@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from services.execution_service.app.order_state_machine import OrderStatus
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -95,6 +97,34 @@ class BrokerPlaceOrderResponse(BaseModel):
     raw_response: dict[str, Any] | None = None
 
 
+class OrderLifecycleView(BaseModel):
+    order_id: str
+    symbol: str
+    side: str
+    quantity: int
+    broker: str
+    current_status: OrderStatus
+    history_count: int
+    external_order_id: str | None = None
+    correlation_id: str | None = None
+    idempotency_key: str | None = None
+    latest_message: str | None = None
+    last_updated_at: datetime = Field(default_factory=utc_now)
+
+
+class OrderEventView(BaseModel):
+    order_id: str
+    from_status: OrderStatus
+    to_status: OrderStatus
+    event_type: str
+    event_time: datetime
+    message: str | None = None
+    filled_quantity: int = 0
+    remaining_quantity: int | None = None
+    average_price: float | None = None
+    raw_payload: dict[str, Any] | None = None
+
+
 class ExecutionServiceStatus(BaseModel):
     service: str
     mode: str
@@ -105,5 +135,6 @@ class ExecutionServiceStatus(BaseModel):
     replay_ready: bool
     approved_loaded: int
     orders_prepared: int
+    active_order_count: int = 0
     last_prepared_at: datetime | None = None
     message: str

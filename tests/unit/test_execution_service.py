@@ -1,7 +1,14 @@
 from datetime import UTC, datetime
 
 from services.execution_service.app.brokers.factory import build_broker_adapter
+from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.models import BrokerPlaceOrderRequest
+from services.execution_service.app.order_state_machine import (
+    InvalidOrderTransition,
+    OrderStateMachine,
+    OrderStatus,
+    normalize_broker_status,
+)
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionService
 from shared.config.settings import Settings
@@ -126,19 +133,27 @@ def test_execution_service_prepares_once() -> None:
     assert status.broker_ready is True
 
 
-def test_execution_service_stub_broker_accepts_first_order() -> None:
+def test_execution_service_stub_broker_accepts_first_order_and_creates_lifecycle() -> None:
     settings = build_settings("fyers_stub")
+    store = InMemoryOrderLifecycleStore()
     service = ExecutionService(
         settings=settings,
         signal_reader=FakeApprovedSignalReader(),
         processor=ExecutionProcessor(settings=settings),
         broker_adapter=build_broker_adapter(settings=settings),
+        lifecycle_store=store,
+        state_machine=OrderStateMachine(),
     )
     result = service.place_first_prepared_order_once()
+    orders = service.list_order_lifecycle()
+
     assert result.accepted is True
     assert result.status == "accepted"
     assert result.external_order_id is not None
     assert result.idempotency_key is not None
+    assert len(orders) == 1
+    assert orders[0].current_status == OrderStatus.ACKNOWLEDGED
+    assert orders[0].history_count == 2
 
 
 def test_execution_request_validates_side() -> None:
@@ -163,3 +178,67 @@ def test_execution_live_broker_error_when_sdk_missing_or_call_fails() -> None:
     result = adapter.place_order(request)
     assert result.accepted is False
     assert result.status in {"accepted", "rejected", "error"}
+
+
+def test_order_state_machine_valid_transition() -> None:
+    machine = OrderStateMachine()
+    event = machine.transition(
+        order_id="ord-1",
+        current=OrderStatus.SUBMITTED,
+        target=OrderStatus.ACKNOWLEDGED,
+        event_type="broker_ack",
+    )
+    assert event.from_status == OrderStatus.SUBMITTED
+    assert event.to_status == OrderStatus.ACKNOWLEDGED
+
+
+def test_order_state_machine_invalid_transition() -> None:
+    machine = OrderStateMachine()
+    try:
+        machine.transition(
+            order_id="ord-1",
+            current=OrderStatus.CREATED,
+            target=OrderStatus.FILLED,
+            event_type="bad_transition",
+        )
+    except InvalidOrderTransition as exc:
+        assert "created -> filled" in str(exc)
+    else:
+        raise AssertionError("Expected InvalidOrderTransition")
+
+
+def test_normalize_broker_status() -> None:
+    assert normalize_broker_status("OPEN") == OrderStatus.OPEN
+    assert normalize_broker_status("complete") == OrderStatus.FILLED
+    assert normalize_broker_status("partially filled") == OrderStatus.PARTIALLY_FILLED
+
+
+def test_apply_broker_update_moves_order_to_filled() -> None:
+    settings = build_settings("fyers_stub")
+    store = InMemoryOrderLifecycleStore()
+    service = ExecutionService(
+        settings=settings,
+        signal_reader=FakeApprovedSignalReader(),
+        processor=ExecutionProcessor(settings=settings),
+        broker_adapter=build_broker_adapter(settings=settings),
+        lifecycle_store=store,
+        state_machine=OrderStateMachine(),
+    )
+    service.place_first_prepared_order_once()
+    order = service.list_order_lifecycle()[0]
+
+    open_event = service.apply_broker_update(
+        order_id=order.order_id,
+        broker_status="OPEN",
+        raw_payload={"status": "OPEN"},
+    )
+    fill_event = service.apply_broker_update(
+        order_id=order.order_id,
+        broker_status="COMPLETE",
+        raw_payload={"status": "COMPLETE", "filledQty": 1, "avgPrice": 600.25},
+    )
+
+    assert open_event.to_status == OrderStatus.OPEN
+    assert fill_event.to_status == OrderStatus.FILLED
+    assert fill_event.filled_quantity == 1
+    assert fill_event.average_price == 600.25

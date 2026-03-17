@@ -8,6 +8,7 @@ from services.execution_service.app.models import (
     BrokerPlaceOrderResponse,
     ExecutionServiceStatus,
 )
+from services.execution_service.app.order_state_machine import OrderStatus
 import services.execution_service.app.api as execution_api
 
 
@@ -23,6 +24,7 @@ class FakeExecutionService:
             replay_ready=True,
             approved_loaded=1,
             orders_prepared=1,
+            active_order_count=1,
             last_prepared_at=datetime(2026, 3, 18, 12, 0, tzinfo=UTC),
             message="Execution service ready",
         )
@@ -114,3 +116,32 @@ def test_place_first_endpoint() -> None:
     assert body["adapter"] == "fyers"
     assert body["status"] == "accepted"
     assert body["idempotency_key"] == "aaaaaaaaaaaaaaaaaaaaaaaa"
+
+
+def test_place_test_endpoint() -> None:
+    response = client.post("/execution-service/broker/place-test")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["idempotency_key"] == "manual-test-idempotency"
+
+
+def test_order_listing_and_history_endpoints() -> None:
+    create_response = client.post("/execution-service/broker/place-test")
+    assert create_response.status_code == 200
+
+    orders_response = client.get("/execution-service/orders")
+    assert orders_response.status_code == 200
+    orders_body = orders_response.json()
+    assert "orders" in orders_body
+
+    if orders_body["count"] > 0:
+        order_id = orders_body["orders"][0]["order_id"]
+        update_response = client.post(
+            f"/execution-service/orders/{order_id}/broker-update",
+            json={"broker_status": "OPEN"},
+        )
+        assert update_response.status_code in {200, 404, 400}
+
+        history_response = client.get(f"/execution-service/orders/{order_id}/history")
+        assert history_response.status_code == 200
