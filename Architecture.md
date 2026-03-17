@@ -753,3 +753,37 @@
   * Output verified
   * Docs updated
 
+# Item 29 — Cancel and modify order flows
+## Checklist
+
+  * Add broker cancel request model
+  * Add broker modify request model
+  * Add broker action response model
+  * Add cancel support in broker adapter
+  * Add modify support in broker adapter
+  * Add service cancel flow
+  * Add service modify flow
+  * Add lifecycle transitions for cancel pending and cancelled
+  * Add lifecycle event for modify acknowledgement
+  * Add API cancel endpoint
+  * Add API modify endpoint
+  * Add tests for cancel flow
+  * Add tests for modify flow
+  * Add validation for illegal cancel/modify states
+  * Verify tests pass
+  * Verify stub cancel and modify paths
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Cancel flow added
+  * Modify flow added
+  * State checks added
+  * Broker stubs added
+  * Tests added
+  * Stub path verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+

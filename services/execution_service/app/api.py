@@ -6,7 +6,11 @@ from services.execution_service.app.models import BrokerPlaceOrderRequest, Broke
 from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine
 from services.execution_service.app.persistence import OrderPersistenceRepository
 from services.execution_service.app.processor import ExecutionProcessor
-from services.execution_service.app.service import ExecutionService, UnknownBrokerUpdateOrderError
+from services.execution_service.app.service import (
+    ExecutionService,
+    OrderActionNotAllowedError,
+    UnknownBrokerUpdateOrderError,
+)
 from services.execution_service.app.signal_reader import ApprovedSignalReader
 from services.execution_service.app.update_consumer import BrokerUpdateConsumer
 from services.indicator_engine.app.repository import IndicatorRepository
@@ -327,4 +331,65 @@ def consume_broker_update(payload: dict[str, object]) -> dict[str, object]:
     return {
         "service": "execution_service",
         "event": event.model_dump(mode="json"),
+    }
+
+
+@app.post("/execution-service/orders/{order_id}/cancel")
+def cancel_order(order_id: str) -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    try:
+        result = service.cancel_order(order_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown order_id: {order_id}") from exc
+    except OrderActionNotAllowedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (InvalidOrderTransition, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "order_id": result.order_id,
+        "broker": result.broker,
+        "adapter": result.adapter,
+        "accepted": result.accepted,
+        "status": result.status,
+        "external_order_id": result.external_order_id,
+        "processed_at": result.processed_at.isoformat(),
+        "message": result.message,
+        "correlation_id": result.correlation_id,
+        "idempotency_key": result.idempotency_key,
+        "raw_response": result.raw_response,
+    }
+
+
+@app.post("/execution-service/orders/{order_id}/modify")
+def modify_order(order_id: str, payload: dict[str, object]) -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    try:
+        result = service.modify_order(
+            order_id,
+            quantity=payload.get("quantity"),
+            limit_price=payload.get("limit_price"),
+            stop_price=payload.get("stop_price"),
+            order_type=payload.get("order_type"),
+            validity=payload.get("validity"),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown order_id: {order_id}") from exc
+    except OrderActionNotAllowedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (InvalidOrderTransition, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "order_id": result.order_id,
+        "broker": result.broker,
+        "adapter": result.adapter,
+        "accepted": result.accepted,
+        "status": result.status,
+        "external_order_id": result.external_order_id,
+        "processed_at": result.processed_at.isoformat(),
+        "message": result.message,
+        "correlation_id": result.correlation_id,
+        "idempotency_key": result.idempotency_key,
+        "raw_response": result.raw_response,
     }

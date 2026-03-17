@@ -43,6 +43,7 @@ ALLOWED_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
         OrderStatus.ERROR,
     },
     OrderStatus.ACKNOWLEDGED: {
+        OrderStatus.ACKNOWLEDGED,
         OrderStatus.OPEN,
         OrderStatus.PARTIALLY_FILLED,
         OrderStatus.CANCEL_PENDING,
@@ -51,6 +52,7 @@ ALLOWED_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
         OrderStatus.ERROR,
     },
     OrderStatus.OPEN: {
+        OrderStatus.OPEN,
         OrderStatus.PARTIALLY_FILLED,
         OrderStatus.FILLED,
         OrderStatus.CANCEL_PENDING,

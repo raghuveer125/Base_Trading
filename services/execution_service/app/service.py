@@ -6,7 +6,10 @@ from uuid import uuid4
 from services.execution_service.app.brokers.base import BrokerAdapter
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.models import (
+    BrokerActionResponse,
+    BrokerCancelOrderRequest,
     BrokerHealth,
+    BrokerModifyOrderRequest,
     BrokerPlaceOrderRequest,
     BrokerPlaceOrderResponse,
     ExecutionServiceStatus,
@@ -26,6 +29,10 @@ class DuplicateOrderSubmissionError(ValueError):
 
 
 class UnknownBrokerUpdateOrderError(KeyError):
+    pass
+
+
+class OrderActionNotAllowedError(ValueError):
     pass
 
 
@@ -151,6 +158,17 @@ class ExecutionService:
             f"Unable to resolve order for broker update: order_id={envelope.order_id}, external_order_id={envelope.external_order_id}"
         )
 
+    def _load_order(self, order_id: str):
+        return self._lifecycle_store.get(order_id)
+
+    def _ensure_cancel_allowed(self, status: OrderStatus) -> None:
+        if status not in {OrderStatus.ACKNOWLEDGED, OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}:
+            raise OrderActionNotAllowedError(f"Cancel not allowed from status {status.value}")
+
+    def _ensure_modify_allowed(self, status: OrderStatus) -> None:
+        if status not in {OrderStatus.ACKNOWLEDGED, OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}:
+            raise OrderActionNotAllowedError(f"Modify not allowed from status {status.value}")
+
     def submit_order_request(self, request: BrokerPlaceOrderRequest, submit_message: str) -> BrokerPlaceOrderResponse:
         duplicate_order_id = self._find_duplicate_order_id(request.idempotency_key)
         if duplicate_order_id is not None:
@@ -254,6 +272,92 @@ class ExecutionService:
             request=request,
             submit_message="Order submitted to broker adapter",
         )
+
+    def cancel_order(self, order_id: str) -> BrokerActionResponse:
+        stored = self._load_order(order_id)
+        self._ensure_cancel_allowed(stored.current_status)
+
+        cancel_pending = self._state_machine.transition(
+            order_id=order_id,
+            current=stored.current_status,
+            target=OrderStatus.CANCEL_PENDING,
+            event_type="cancel_request",
+            message="Cancel requested",
+        )
+        self._lifecycle_store.append_event(order_id, cancel_pending, external_order_id=stored.external_order_id)
+        self._persist_event(order_id)
+
+        request = BrokerCancelOrderRequest(
+            order_id=order_id,
+            external_order_id=stored.external_order_id,
+            correlation_id=stored.correlation_id,
+            idempotency_key=stored.idempotency_key,
+        )
+        result = self._broker_adapter.cancel_order(request)
+
+        next_status = OrderStatus.CANCELLED if result.accepted else OrderStatus.ERROR
+        event_type = "broker_cancel_ack" if result.accepted else "broker_cancel_reject"
+        final_event = self._state_machine.transition(
+            order_id=order_id,
+            current=OrderStatus.CANCEL_PENDING,
+            target=next_status,
+            event_type=event_type,
+            message=result.message,
+            raw_payload=result.raw_response,
+        )
+        self._lifecycle_store.append_event(order_id, final_event, external_order_id=stored.external_order_id)
+        self._persist_event(order_id)
+        result.order_id = order_id
+        return result
+
+    def modify_order(
+        self,
+        order_id: str,
+        *,
+        quantity: int | None = None,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        order_type: str | None = None,
+        validity: str | None = None,
+    ) -> BrokerActionResponse:
+        stored = self._load_order(order_id)
+        self._ensure_modify_allowed(stored.current_status)
+
+        request = BrokerModifyOrderRequest(
+            order_id=order_id,
+            external_order_id=stored.external_order_id,
+            quantity=quantity,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            order_type=order_type,
+            validity=validity,
+            correlation_id=stored.correlation_id,
+            idempotency_key=stored.idempotency_key,
+        )
+        result = self._broker_adapter.modify_order(request)
+
+        if result.accepted:
+            event = self._state_machine.transition(
+                order_id=order_id,
+                current=stored.current_status,
+                target=stored.current_status,
+                event_type="broker_modify_ack",
+                message=result.message,
+                raw_payload=result.raw_response,
+            )
+        else:
+            event = self._state_machine.transition(
+                order_id=order_id,
+                current=stored.current_status,
+                target=OrderStatus.ERROR,
+                event_type="broker_modify_reject",
+                message=result.message,
+                raw_payload=result.raw_response,
+            )
+        self._lifecycle_store.append_event(order_id, event, external_order_id=stored.external_order_id)
+        self._persist_event(order_id)
+        result.order_id = order_id
+        return result
 
     def apply_broker_update(
         self,

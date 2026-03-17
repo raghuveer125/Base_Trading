@@ -84,6 +84,54 @@ class BrokerPlaceOrderRequest(BaseModel):
         return normalized
 
 
+class BrokerCancelOrderRequest(BaseModel):
+    order_id: str
+    external_order_id: str | None = None
+    correlation_id: str | None = None
+    idempotency_key: str | None = None
+
+
+class BrokerModifyOrderRequest(BaseModel):
+    order_id: str
+    external_order_id: str | None = None
+    quantity: int | None = None
+    limit_price: float | None = None
+    stop_price: float | None = None
+    order_type: str | None = None
+    validity: str | None = None
+    correlation_id: str | None = None
+    idempotency_key: str | None = None
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("quantity must be positive")
+        return value
+
+    @field_validator("order_type")
+    @classmethod
+    def validate_order_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        normalized = value.strip().upper()
+        allowed = {"MARKET", "LIMIT", "STOP", "STOP_LIMIT"}
+        if normalized not in allowed:
+            raise ValueError(f"order_type must be one of {sorted(allowed)}")
+        return normalized
+
+    @field_validator("validity")
+    @classmethod
+    def validate_validity(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        normalized = value.strip().upper()
+        allowed = {"DAY", "IOC"}
+        if normalized not in allowed:
+            raise ValueError(f"validity must be one of {sorted(allowed)}")
+        return normalized
+
+
 class BrokerPlaceOrderResponse(BaseModel):
     broker: str
     adapter: str
@@ -97,6 +145,20 @@ class BrokerPlaceOrderResponse(BaseModel):
     raw_response: dict[str, Any] | None = None
     order_id: str | None = None
     duplicate_of_order_id: str | None = None
+
+
+class BrokerActionResponse(BaseModel):
+    broker: str
+    adapter: str
+    accepted: bool
+    status: str
+    external_order_id: str | None = None
+    processed_at: datetime = Field(default_factory=utc_now)
+    message: str
+    correlation_id: str | None = None
+    idempotency_key: str | None = None
+    raw_response: dict[str, Any] | None = None
+    order_id: str | None = None
 
 
 class OrderLifecycleView(BaseModel):

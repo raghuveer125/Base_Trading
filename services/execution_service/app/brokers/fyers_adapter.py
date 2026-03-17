@@ -4,7 +4,10 @@ from typing import Any
 
 from services.execution_service.app.brokers.base import BrokerAdapter
 from services.execution_service.app.models import (
+    BrokerActionResponse,
+    BrokerCancelOrderRequest,
     BrokerHealth,
+    BrokerModifyOrderRequest,
     BrokerPlaceOrderRequest,
     BrokerPlaceOrderResponse,
 )
@@ -64,7 +67,7 @@ class FyersBrokerAdapter(BrokerAdapter):
         return mapping[normalized]
 
     def _build_payload(self, request: BrokerPlaceOrderRequest) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+        return {
             "symbol": request.symbol,
             "qty": request.quantity,
             "type": self._map_order_type(request.order_type),
@@ -79,7 +82,6 @@ class FyersBrokerAdapter(BrokerAdapter):
             "takeProfit": request.take_profit,
             "orderTag": request.idempotency_key or request.correlation_id or "execution_service",
         }
-        return payload
 
     def _extract_order_id(self, response: dict[str, Any]) -> str | None:
         candidates = [
@@ -102,11 +104,7 @@ class FyersBrokerAdapter(BrokerAdapter):
         return None
 
     def _is_success_response(self, response: dict[str, Any]) -> bool:
-        if response.get("s") == "ok":
-            return True
-        if response.get("code") in {200, 201, 1101}:
-            return True
-        return False
+        return bool(response.get("s") == "ok" or response.get("code") in {200, 201, 1101})
 
     def _get_live_client(self) -> Any:
         try:
@@ -125,14 +123,6 @@ class FyersBrokerAdapter(BrokerAdapter):
     def _place_live_order(self, request: BrokerPlaceOrderRequest) -> BrokerPlaceOrderResponse:
         payload = self._build_payload(request)
         client = self._get_live_client()
-        self._logger.info(
-            "fyers_live_order_submit_started",
-            symbol=request.symbol,
-            side=request.side,
-            quantity=request.quantity,
-            correlation_id=request.correlation_id,
-            idempotency_key=request.idempotency_key,
-        )
         raw_response = client.place_order(payload)
         if not isinstance(raw_response, dict):
             raw_response = {"raw": str(raw_response)}
@@ -140,15 +130,6 @@ class FyersBrokerAdapter(BrokerAdapter):
         accepted = self._is_success_response(raw_response)
         external_order_id = self._extract_order_id(raw_response)
         status = "accepted" if accepted else "rejected"
-
-        self._logger.info(
-            "fyers_live_order_submit_finished",
-            accepted=accepted,
-            status=status,
-            external_order_id=external_order_id,
-            correlation_id=request.correlation_id,
-            idempotency_key=request.idempotency_key,
-        )
 
         return BrokerPlaceOrderResponse(
             broker=self.adapter_name(),
@@ -201,17 +182,6 @@ class FyersBrokerAdapter(BrokerAdapter):
             f"{request.side.lower()}-{request.quantity}-"
             f"{request.idempotency_key or 'na'}"
         )
-        self._logger.info(
-            "fyers_stub_order_accepted",
-            symbol=request.symbol,
-            side=request.side,
-            quantity=request.quantity,
-            order_type=request.order_type,
-            product=request.product,
-            external_order_id=synthetic_id,
-            correlation_id=request.correlation_id,
-            idempotency_key=request.idempotency_key,
-        )
         return BrokerPlaceOrderResponse(
             broker=self.adapter_name(),
             adapter="fyers",
@@ -222,4 +192,101 @@ class FyersBrokerAdapter(BrokerAdapter):
             correlation_id=request.correlation_id,
             idempotency_key=request.idempotency_key,
             raw_response=self._build_payload(request),
+        )
+
+    def cancel_order(self, request: BrokerCancelOrderRequest) -> BrokerActionResponse:
+        health = self.health_check()
+        if not health.ready:
+            return BrokerActionResponse(
+                broker=self.adapter_name(),
+                adapter="fyers",
+                accepted=False,
+                status="rejected",
+                external_order_id=request.external_order_id,
+                message="Broker credentials missing",
+                correlation_id=request.correlation_id,
+                idempotency_key=request.idempotency_key,
+                order_id=request.order_id,
+            )
+
+        if self.is_live():
+            return BrokerActionResponse(
+                broker=self.adapter_name(),
+                adapter="fyers",
+                accepted=False,
+                status="not_implemented",
+                external_order_id=request.external_order_id,
+                message="FYERS live cancel integration pending",
+                correlation_id=request.correlation_id,
+                idempotency_key=request.idempotency_key,
+                raw_response={"operation": "cancel", "pending": True},
+                order_id=request.order_id,
+            )
+
+        return BrokerActionResponse(
+            broker=self.adapter_name(),
+            adapter="fyers",
+            accepted=True,
+            status="cancelled",
+            external_order_id=request.external_order_id,
+            message="Stub broker cancelled order",
+            correlation_id=request.correlation_id,
+            idempotency_key=request.idempotency_key,
+            raw_response={
+                "operation": "cancel",
+                "order_id": request.order_id,
+                "external_order_id": request.external_order_id,
+            },
+            order_id=request.order_id,
+        )
+
+    def modify_order(self, request: BrokerModifyOrderRequest) -> BrokerActionResponse:
+        health = self.health_check()
+        if not health.ready:
+            return BrokerActionResponse(
+                broker=self.adapter_name(),
+                adapter="fyers",
+                accepted=False,
+                status="rejected",
+                external_order_id=request.external_order_id,
+                message="Broker credentials missing",
+                correlation_id=request.correlation_id,
+                idempotency_key=request.idempotency_key,
+                order_id=request.order_id,
+            )
+
+        if self.is_live():
+            return BrokerActionResponse(
+                broker=self.adapter_name(),
+                adapter="fyers",
+                accepted=False,
+                status="not_implemented",
+                external_order_id=request.external_order_id,
+                message="FYERS live modify integration pending",
+                correlation_id=request.correlation_id,
+                idempotency_key=request.idempotency_key,
+                raw_response={"operation": "modify", "pending": True},
+                order_id=request.order_id,
+            )
+
+        return BrokerActionResponse(
+            broker=self.adapter_name(),
+            adapter="fyers",
+            accepted=True,
+            status="modified",
+            external_order_id=request.external_order_id,
+            message="Stub broker modified order",
+            correlation_id=request.correlation_id,
+            idempotency_key=request.idempotency_key,
+            raw_response={
+                "operation": "modify",
+                "order_id": request.order_id,
+                "external_order_id": request.external_order_id,
+                "quantity": request.quantity,
+                "limit_price": request.limit_price,
+                "stop_price": request.stop_price,
+                "order_type": request.order_type,
+                "validity": request.validity,
+            },
+            order_id=request.order_id,
         )
