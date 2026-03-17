@@ -693,3 +693,32 @@
   * Output verified
   * Docs updated
 
+# Item 27 — Idempotent order submission
+## Checklist
+
+  * Add unique idempotency key handling
+  * Add repository lookup by idempotency key
+  * Prevent duplicate order creation for same idempotency key
+  * Return duplicate response instead of resubmitting
+  * Reuse existing order id for duplicate requests
+  * Apply duplicate protection to prepared order flow
+  * Apply duplicate protection to manual test order flow
+  * Add response fields for duplicate_of_order_id
+  * Add unit tests for duplicate submissions
+  * Add tests for idempotent manual registration
+  * Verify tests pass
+  * Verify repeated submission returns duplicate
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Idempotency guard added
+  * Duplicate response added
+  * Service tests added
+  * Prepared flow protected
+  * Manual flow protected
+  * Failure case checked
+  * Output verified
+  * Docs updated
+

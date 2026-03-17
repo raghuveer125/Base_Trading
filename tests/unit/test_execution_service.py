@@ -1,6 +1,5 @@
 from datetime import UTC, datetime
 
-
 from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.models import BrokerPlaceOrderRequest, BrokerPlaceOrderResponse
@@ -10,7 +9,6 @@ from services.execution_service.app.order_state_machine import (
     OrderStatus,
     normalize_broker_status,
 )
-from services.execution_service.app.persistence import OrderPersistenceRepository
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionService
 from shared.config.settings import Settings
@@ -142,6 +140,16 @@ class FakePersistenceRepository:
     def active_order_count(self) -> int:
         return len([o for o in self.orders.values() if o["current_status"] not in {"filled", "cancelled", "rejected"}])
 
+    def get_order_by_idempotency_key(self, idempotency_key: str):
+        for order in self.orders.values():
+            if order["idempotency_key"] == idempotency_key:
+                class P:
+                    pass
+                p = P()
+                p.order_id = order["order_id"]
+                return p
+        return None
+
 
 def test_execution_processor_prepares_order() -> None:
     processor = ExecutionProcessor(settings=build_settings())
@@ -202,11 +210,44 @@ def test_execution_service_stub_broker_accepts_first_order_and_creates_lifecycle
     assert result.status == "accepted"
     assert result.external_order_id is not None
     assert result.idempotency_key is not None
+    assert result.order_id is not None
     assert len(orders) == 1
     assert orders[0].current_status == OrderStatus.ACKNOWLEDGED
     assert orders[0].history_count == 2
     assert len(repo.events) == 2
     assert len(repo.orders) == 1
+
+
+def test_duplicate_manual_submission_returns_duplicate_response() -> None:
+    settings = build_settings("fyers_stub")
+    store = InMemoryOrderLifecycleStore()
+    repo = FakePersistenceRepository()
+    service = ExecutionService(
+        settings=settings,
+        signal_reader=None,
+        processor=ExecutionProcessor(settings=settings),
+        broker_adapter=build_broker_adapter(settings=settings),
+        lifecycle_store=store,
+        state_machine=OrderStateMachine(),
+        persistence_repository=repo,
+    )
+
+    request = BrokerPlaceOrderRequest(
+        symbol="NSE:SBIN-EQ",
+        side="BUY",
+        quantity=1,
+        correlation_id="manual-test-correlation",
+        idempotency_key="manual-test-idempotency",
+    )
+
+    first = service.submit_order_request(request, "first submit")
+    second = service.submit_order_request(request, "duplicate submit")
+
+    assert first.status == "accepted"
+    assert first.order_id is not None
+    assert second.status == "duplicate"
+    assert second.duplicate_of_order_id == first.order_id
+    assert len(store.list_orders()) == 1
 
 
 def test_execution_request_validates_side() -> None:
@@ -300,7 +341,7 @@ def test_apply_broker_update_moves_order_to_filled() -> None:
     assert len(repo.events) == 4
 
 
-def test_register_manual_test_order_persists_lifecycle() -> None:
+def test_register_manual_test_order_is_idempotent() -> None:
     settings = build_settings("fyers_stub")
     store = InMemoryOrderLifecycleStore()
     repo = FakePersistenceRepository()
@@ -325,7 +366,9 @@ def test_register_manual_test_order_persists_lifecycle() -> None:
         idempotency_key="manual-test-idempotency",
         raw_response={"symbol": "NSE:SBIN-EQ"},
     )
-    order_id = service.register_manual_test_order(response)
+    first_id = service.register_manual_test_order(response)
+    second_id = service.register_manual_test_order(response)
 
-    assert order_id in repo.orders
+    assert first_id == second_id
+    assert len(repo.orders) == 1
     assert len(repo.events) == 2

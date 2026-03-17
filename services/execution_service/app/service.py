@@ -7,6 +7,7 @@ from services.execution_service.app.brokers.base import BrokerAdapter
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.models import (
     BrokerHealth,
+    BrokerPlaceOrderRequest,
     BrokerPlaceOrderResponse,
     ExecutionServiceStatus,
     OrderEventView,
@@ -17,6 +18,10 @@ from services.execution_service.app.persistence import OrderPersistenceRepositor
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.signal_reader import ApprovedSignalReader
 from shared.config.settings import Settings
+
+
+class DuplicateOrderSubmissionError(ValueError):
+    pass
 
 
 class ExecutionService:
@@ -65,6 +70,41 @@ class ExecutionService:
         self._persistence_repository.insert_event(event)
         self._persist_current_order(order_id)
 
+    def _find_duplicate_order_id(self, idempotency_key: str | None) -> str | None:
+        if not idempotency_key:
+            return None
+
+        for order in self._lifecycle_store.list_orders():
+            if order.idempotency_key == idempotency_key:
+                return order.order_id
+
+        if self._persistence_repository is not None:
+            persisted = self._persistence_repository.get_order_by_idempotency_key(idempotency_key)
+            if persisted is not None:
+                return persisted.order_id
+
+        return None
+
+    def _build_duplicate_response(
+        self,
+        *,
+        request: BrokerPlaceOrderRequest,
+        order_id: str,
+    ) -> BrokerPlaceOrderResponse:
+        return BrokerPlaceOrderResponse(
+            broker=self._settings.execution_service_broker,
+            adapter="fyers",
+            accepted=True,
+            status="duplicate",
+            external_order_id=None,
+            message=f"Duplicate idempotency key detected; reusing order {order_id}",
+            correlation_id=request.correlation_id,
+            idempotency_key=request.idempotency_key,
+            raw_response={"duplicate": True, "order_id": order_id},
+            order_id=order_id,
+            duplicate_of_order_id=order_id,
+        )
+
     def prepare_once(self) -> list[dict[str, str]]:
         if self._signal_reader is None:
             return []
@@ -82,66 +122,11 @@ class ExecutionService:
         normalized = seed.replace(":", "_").replace("|", "_")
         return f"ord-{normalized}-{uuid4().hex[:8]}"
 
-    def register_manual_test_order(self, response: BrokerPlaceOrderResponse) -> str:
-        symbol = "NSE:SBIN-EQ"
-        side = "BUY"
-        quantity = 1
-        internal_order_id = self._build_internal_order_id(symbol, response.correlation_id or "manual-test")
+    def submit_order_request(self, request: BrokerPlaceOrderRequest, submit_message: str) -> BrokerPlaceOrderResponse:
+        duplicate_order_id = self._find_duplicate_order_id(request.idempotency_key)
+        if duplicate_order_id is not None:
+            return self._build_duplicate_response(request=request, order_id=duplicate_order_id)
 
-        self._lifecycle_store.create_order(
-            order_id=internal_order_id,
-            symbol=symbol,
-            side=side,
-            quantity=quantity,
-            broker=self._settings.execution_service_broker,
-            correlation_id=response.correlation_id,
-            idempotency_key=response.idempotency_key,
-        )
-        self._persist_current_order(internal_order_id)
-
-        submitted_event = self._state_machine.transition(
-            order_id=internal_order_id,
-            current=OrderStatus.CREATED,
-            target=OrderStatus.SUBMITTED,
-            event_type="submit_request",
-            message="Manual test order submitted to broker adapter",
-        )
-        self._lifecycle_store.append_event(internal_order_id, submitted_event)
-        self._persist_event(internal_order_id)
-
-        target = OrderStatus.ACKNOWLEDGED if response.accepted else (
-            OrderStatus.REJECTED if response.status in {"rejected", "empty"} else OrderStatus.ERROR
-        )
-        event_type = "broker_ack" if response.accepted else "broker_reject"
-        broker_event = self._state_machine.transition(
-            order_id=internal_order_id,
-            current=OrderStatus.SUBMITTED,
-            target=target,
-            event_type=event_type,
-            message=response.message,
-            raw_payload=response.raw_response,
-        )
-        self._lifecycle_store.append_event(
-            internal_order_id,
-            broker_event,
-            external_order_id=response.external_order_id,
-        )
-        self._persist_event(internal_order_id)
-        return internal_order_id
-
-    def place_first_prepared_order_once(self) -> BrokerPlaceOrderResponse:
-        orders = self.prepare_once()
-        if not orders:
-            return BrokerPlaceOrderResponse(
-                broker=self._settings.execution_service_broker,
-                adapter="fyers",
-                accepted=False,
-                status="empty",
-                external_order_id=None,
-                message="No approved signals available for broker submission",
-            )
-
-        request = self._processor.build_broker_request(orders[0])
         internal_order_id = self._build_internal_order_id(request.symbol, request.correlation_id)
 
         self._lifecycle_store.create_order(
@@ -160,7 +145,7 @@ class ExecutionService:
             current=OrderStatus.CREATED,
             target=OrderStatus.SUBMITTED,
             event_type="submit_request",
-            message="Order submitted to broker adapter",
+            message=submit_message,
         )
         self._lifecycle_store.append_event(internal_order_id, created_event)
         self._persist_event(internal_order_id)
@@ -199,7 +184,47 @@ class ExecutionService:
             )
             self._persist_event(internal_order_id)
 
+        result.order_id = internal_order_id
         return result
+
+    def register_manual_test_order(self, response: BrokerPlaceOrderResponse) -> str:
+        request = BrokerPlaceOrderRequest(
+            symbol="NSE:SBIN-EQ",
+            side="BUY",
+            quantity=1,
+            order_type="MARKET",
+            product="INTRADAY",
+            validity="DAY",
+            correlation_id=response.correlation_id,
+            idempotency_key=response.idempotency_key,
+        )
+        duplicate_order_id = self._find_duplicate_order_id(request.idempotency_key)
+        if duplicate_order_id is not None:
+            return duplicate_order_id
+
+        registered = self.submit_order_request(
+            request=request,
+            submit_message="Manual test order submitted to broker adapter",
+        )
+        return registered.order_id or ""
+
+    def place_first_prepared_order_once(self) -> BrokerPlaceOrderResponse:
+        orders = self.prepare_once()
+        if not orders:
+            return BrokerPlaceOrderResponse(
+                broker=self._settings.execution_service_broker,
+                adapter="fyers",
+                accepted=False,
+                status="empty",
+                external_order_id=None,
+                message="No approved signals available for broker submission",
+            )
+
+        request = self._processor.build_broker_request(orders[0])
+        return self.submit_order_request(
+            request=request,
+            submit_message="Order submitted to broker adapter",
+        )
 
     def apply_broker_update(
         self,

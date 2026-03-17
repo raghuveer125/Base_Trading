@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.models import BrokerPlaceOrderRequest, BrokerPlaceOrderResponse
-from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine, OrderStatus
+from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine
 from services.execution_service.app.persistence import OrderPersistenceRepository
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionService
@@ -205,6 +205,8 @@ def place_first() -> dict[str, object]:
         )
 
     return {
+        "order_id": result.order_id,
+        "duplicate_of_order_id": result.duplicate_of_order_id,
         "broker": result.broker,
         "adapter": result.adapter,
         "accepted": result.accepted,
@@ -221,8 +223,6 @@ def place_first() -> dict[str, object]:
 @app.post("/execution-service/broker/place-test")
 def place_test() -> dict[str, object]:
     settings = get_settings()
-    broker_adapter = build_broker_adapter(settings=settings)
-
     request = BrokerPlaceOrderRequest(
         symbol="NSE:SBIN-EQ",
         side="BUY",
@@ -233,13 +233,16 @@ def place_test() -> dict[str, object]:
         correlation_id="manual-test-correlation",
         idempotency_key="manual-test-idempotency",
     )
-    result = broker_adapter.place_order(request)
 
     service = build_lifecycle_only_service()
-    order_id = service.register_manual_test_order(result)
+    result = service.submit_order_request(
+        request=request,
+        submit_message="Manual test order submitted to broker adapter",
+    )
 
     return {
-        "order_id": order_id,
+        "order_id": result.order_id,
+        "duplicate_of_order_id": result.duplicate_of_order_id,
         "broker": result.broker,
         "adapter": result.adapter,
         "accepted": result.accepted,

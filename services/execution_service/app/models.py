@@ -95,6 +95,8 @@ class BrokerPlaceOrderResponse(BaseModel):
     correlation_id: str | None = None
     idempotency_key: str | None = None
     raw_response: dict[str, Any] | None = None
+    order_id: str | None = None
+    duplicate_of_order_id: str | None = None
 
 
 class OrderLifecycleView(BaseModel):

@@ -63,10 +63,36 @@ class FakeExecutionService:
             correlation_id="NSE:SBIN-EQ|1m|2026-03-18T12:00:00+00:00",
             idempotency_key="aaaaaaaaaaaaaaaaaaaaaaaa",
             raw_response={"symbol": "NSE:SBIN-EQ"},
+            order_id="ord-prepared-api",
         )
 
-    def register_manual_test_order(self, response: BrokerPlaceOrderResponse) -> str:
-        return "ord-manual-test-api"
+    def submit_order_request(self, request, submit_message: str) -> BrokerPlaceOrderResponse:
+        if request.idempotency_key == "manual-test-idempotency":
+            return BrokerPlaceOrderResponse(
+                broker="fyers_stub",
+                adapter="fyers",
+                accepted=True,
+                status="accepted",
+                external_order_id="stub-NSE_SBIN-EQ-buy-1-test",
+                message=submit_message,
+                correlation_id=request.correlation_id,
+                idempotency_key=request.idempotency_key,
+                raw_response={"symbol": "NSE:SBIN-EQ"},
+                order_id="ord-manual-test-api",
+            )
+        return BrokerPlaceOrderResponse(
+            broker="fyers_stub",
+            adapter="fyers",
+            accepted=True,
+            status="duplicate",
+            external_order_id=None,
+            message="duplicate",
+            correlation_id=request.correlation_id,
+            idempotency_key=request.idempotency_key,
+            raw_response={"duplicate": True},
+            order_id="ord-manual-test-api",
+            duplicate_of_order_id="ord-manual-test-api",
+        )
 
     def list_order_lifecycle(self):
         return []
@@ -125,6 +151,7 @@ def test_place_first_endpoint() -> None:
     assert body["adapter"] == "fyers"
     assert body["status"] == "accepted"
     assert body["idempotency_key"] == "aaaaaaaaaaaaaaaaaaaaaaaa"
+    assert body["order_id"] == "ord-prepared-api"
 
 
 def test_place_test_endpoint() -> None:
