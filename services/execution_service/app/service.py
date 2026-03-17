@@ -18,6 +18,7 @@ from services.execution_service.app.models import (
 )
 from services.execution_service.app.order_state_machine import OrderStateMachine, OrderStatus
 from services.execution_service.app.persistence import OrderPersistenceRepository
+from services.execution_service.app.positions import FillEvent, PositionService
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.signal_reader import ApprovedSignalReader
 from services.execution_service.app.update_consumer import BrokerUpdateConsumer, BrokerUpdateEnvelope
@@ -47,6 +48,7 @@ class ExecutionService:
         state_machine: OrderStateMachine | None = None,
         persistence_repository: OrderPersistenceRepository | None = None,
         update_consumer: BrokerUpdateConsumer | None = None,
+        position_service: PositionService | None = None,
     ) -> None:
         self._settings = settings
         self._signal_reader = signal_reader
@@ -56,6 +58,7 @@ class ExecutionService:
         self._state_machine = state_machine or OrderStateMachine()
         self._persistence_repository = persistence_repository
         self._update_consumer = update_consumer or BrokerUpdateConsumer()
+        self._position_service = position_service or PositionService()
         self._orders_prepared = 0
         self._last_prepared_at: datetime | None = None
 
@@ -379,6 +382,23 @@ class ExecutionService:
             external_order_id=stored.external_order_id,
         )
         self._persist_event(order_id)
+
+        if event.to_status == OrderStatus.FILLED:
+            filled_quantity = int(event.filled_quantity or stored.quantity)
+            avg_price = float(event.average_price or 0.0)
+            if avg_price > 0 and filled_quantity > 0:
+                self._position_service.apply_fill(
+                    FillEvent(
+                        order_id=order_id,
+                        symbol=stored.symbol,
+                        fill_quantity=filled_quantity,
+                        fill_price=avg_price,
+                        side=stored.side,
+                        event_time=event.event_time,
+                        raw_payload=event.raw_payload,
+                    )
+                )
+
         return self._lifecycle_store.get_history(order_id)[-1]
 
     def consume_broker_update(
@@ -400,6 +420,12 @@ class ExecutionService:
             raw_payload=merged_payload,
         )
 
+    def get_position(self, symbol: str):
+        return self._position_service.get_position(symbol)
+
+    def list_positions(self):
+        return self._position_service.list_positions()
+
     def list_order_lifecycle(self) -> list[OrderLifecycleView]:
         if self._persistence_repository is not None:
             return self._persistence_repository.list_orders()
@@ -418,6 +444,7 @@ class ExecutionService:
             if self._persistence_repository is not None
             else self._lifecycle_store.active_order_count()
         )
+        open_position_count = len([p for p in self._position_service.list_positions() if p.net_quantity != 0])
         return ExecutionServiceStatus(
             service="execution_service",
             mode=self._settings.execution_service_mode,
@@ -429,6 +456,7 @@ class ExecutionService:
             approved_loaded=len(approved),
             orders_prepared=self._orders_prepared,
             active_order_count=active_order_count,
+            open_position_count=open_position_count,
             last_prepared_at=self._last_prepared_at,
             message="Execution service ready",
         )

@@ -787,3 +787,36 @@
   * Output verified
   * Docs updated
 
+# Item 30 — Position service skeleton
+## Checklist
+
+  * Add position service module
+  * Add fill event model
+  * Add long and short lot tracking
+  * Add net quantity calculation
+  * Add average price calculation
+  * Add realized pnl calculation skeleton
+  * Update execution service on filled events
+  * Add list positions service method
+  * Add get position service method
+  * Add positions API endpoint
+  * Add single position API endpoint
+  * Add tests for long position creation
+  * Add tests for round-trip pnl
+  * Add tests for service position updates
+  * Verify tests pass
+  * Verify runtime position endpoint
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Position service added
+  * Fill processing added
+  * Position APIs added
+  * Tests added
+  * Runtime path verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+

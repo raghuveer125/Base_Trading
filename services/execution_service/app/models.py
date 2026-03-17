@@ -161,6 +161,22 @@ class BrokerActionResponse(BaseModel):
     order_id: str | None = None
 
 
+class PositionLotView(BaseModel):
+    quantity: int
+    price: float
+    side: str
+
+
+class PositionView(BaseModel):
+    symbol: str
+    net_quantity: int
+    avg_price: float
+    side: str
+    realized_pnl: float
+    open_lots: list[PositionLotView]
+    updated_at: datetime
+
+
 class OrderLifecycleView(BaseModel):
     order_id: str
     symbol: str
@@ -200,5 +216,6 @@ class ExecutionServiceStatus(BaseModel):
     approved_loaded: int
     orders_prepared: int
     active_order_count: int = 0
+    open_position_count: int = 0
     last_prepared_at: datetime | None = None
     message: str
