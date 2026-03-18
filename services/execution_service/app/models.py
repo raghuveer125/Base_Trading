@@ -227,6 +227,23 @@ class AuditNoteRequest(BaseModel):
         return value
 
 
+class TradeView(BaseModel):
+    trade_id: str
+    symbol: str
+    entry_side: str
+    entry_quantity: int
+    entry_price: float
+    entry_time: datetime
+    exit_quantity: int
+    exit_price: float | None = None
+    exit_time: datetime | None = None
+    realized_pnl: float
+    status: str
+    entry_order_id: str | None = None
+    exit_order_id: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
 class OrderLifecycleView(BaseModel):
     order_id: str
     symbol: str

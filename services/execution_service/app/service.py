@@ -27,6 +27,8 @@ from services.execution_service.app.position_persistence import PositionPersiste
 from services.execution_service.app.positions import FillEvent, PositionService
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.signal_reader import ApprovedSignalReader
+from services.execution_service.app.trade_persistence import TradePersistenceRepository
+from services.execution_service.app.trades import FillForLedger, InMemoryTradeLedger
 from services.execution_service.app.update_consumer import BrokerUpdateConsumer, BrokerUpdateEnvelope
 from shared.config.settings import Settings
 
@@ -64,6 +66,8 @@ class ExecutionService:
         execution_risk_guard: ExecutionRiskGuard | None = None,
         audit_trail: InMemoryAuditTrail | None = None,
         audit_persistence_repository: AuditPersistenceRepository | None = None,
+        trade_ledger: InMemoryTradeLedger | None = None,
+        trade_persistence_repository: TradePersistenceRepository | None = None,
     ) -> None:
         self._settings = settings
         self._signal_reader = signal_reader
@@ -83,6 +87,8 @@ class ExecutionService:
         )
         self._audit_trail = audit_trail or InMemoryAuditTrail()
         self._audit_persistence_repository = audit_persistence_repository
+        self._trade_ledger = trade_ledger or InMemoryTradeLedger()
+        self._trade_persistence_repository = trade_persistence_repository
         self._orders_prepared = 0
         self._last_prepared_at: datetime | None = None
 
@@ -168,27 +174,26 @@ class ExecutionService:
         snapshot = self._position_service.get_position(symbol)
         self._position_persistence_repository.upsert_position(snapshot)
 
+    def _persist_trade(self, trade) -> None:
+        if self._trade_persistence_repository is None:
+            return
+        self._trade_persistence_repository.insert_trade(trade)
+
     def _find_duplicate_order_id(self, idempotency_key: str | None) -> str | None:
         if not idempotency_key:
             return None
-
         for order in self._lifecycle_store.list_orders():
             if order.idempotency_key == idempotency_key:
                 return order.order_id
-
         if self._persistence_repository is not None:
             persisted = self._persistence_repository.get_order_by_idempotency_key(idempotency_key)
             if persisted is not None:
                 return persisted.order_id
-
         return None
 
     def evaluate_execution_risk(self, request: BrokerPlaceOrderRequest) -> ExecutionRiskDecision:
         positions = self.list_positions()
-        return self._execution_risk_guard.evaluate_order(
-            request=request,
-            positions=positions,
-        )
+        return self._execution_risk_guard.evaluate_order(request=request, positions=positions)
 
     def _build_duplicate_response(
         self,
@@ -201,7 +206,6 @@ class ExecutionService:
             message=f"Duplicate idempotency key detected; reusing order {order_id}",
             order_id=order_id,
             symbol=request.symbol,
-            actor="system",
             metadata={"idempotency_key": request.idempotency_key},
         )
         return BrokerPlaceOrderResponse(
@@ -243,7 +247,6 @@ class ExecutionService:
                 persisted = self._persistence_repository.get_order(envelope.order_id)
                 if persisted is not None:
                     return persisted.order_id
-
         if envelope.external_order_id:
             stored = self._lifecycle_store.find_by_external_order_id(envelope.external_order_id)
             if stored is not None:
@@ -252,7 +255,6 @@ class ExecutionService:
                 persisted = self._persistence_repository.get_order_by_external_order_id(envelope.external_order_id)
                 if persisted is not None:
                     return persisted.order_id
-
         raise UnknownBrokerUpdateOrderError(
             f"Unable to resolve order for broker update: order_id={envelope.order_id}, external_order_id={envelope.external_order_id}"
         )
@@ -278,15 +280,12 @@ class ExecutionService:
             self._append_audit_event(
                 event_type="risk_rejected",
                 message=risk_decision.reason,
-                order_id=None,
                 symbol=request.symbol,
-                actor="system",
                 metadata={"code": risk_decision.code, "side": request.side, "quantity": request.quantity},
             )
             raise ExecutionRiskRejectedError(risk_decision.reason)
 
         internal_order_id = self._build_internal_order_id(request.symbol, request.correlation_id)
-
         self._lifecycle_store.create_order(
             order_id=internal_order_id,
             symbol=request.symbol,
@@ -302,7 +301,6 @@ class ExecutionService:
             message=submit_message,
             order_id=internal_order_id,
             symbol=request.symbol,
-            actor="system",
             metadata={"side": request.side, "quantity": request.quantity},
         )
 
@@ -327,18 +325,13 @@ class ExecutionService:
                 message=result.message,
                 raw_payload=result.raw_response,
             )
-            self._lifecycle_store.append_event(
-                internal_order_id,
-                ack_event,
-                external_order_id=result.external_order_id,
-            )
+            self._lifecycle_store.append_event(internal_order_id, ack_event, external_order_id=result.external_order_id)
             self._persist_event(internal_order_id)
             self._append_audit_event(
                 event_type="broker_ack",
                 message=result.message,
                 order_id=internal_order_id,
                 symbol=request.symbol,
-                actor="system",
                 metadata={"external_order_id": result.external_order_id},
             )
         else:
@@ -351,18 +344,13 @@ class ExecutionService:
                 message=result.message,
                 raw_payload=result.raw_response,
             )
-            self._lifecycle_store.append_event(
-                internal_order_id,
-                reject_event,
-                external_order_id=result.external_order_id,
-            )
+            self._lifecycle_store.append_event(internal_order_id, reject_event, external_order_id=result.external_order_id)
             self._persist_event(internal_order_id)
             self._append_audit_event(
                 event_type="broker_reject",
                 message=result.message,
                 order_id=internal_order_id,
                 symbol=request.symbol,
-                actor="system",
                 metadata={"external_order_id": result.external_order_id},
             )
 
@@ -380,12 +368,8 @@ class ExecutionService:
                 external_order_id=None,
                 message="No approved signals available for broker submission",
             )
-
         request = self._processor.build_broker_request(orders[0])
-        return self.submit_order_request(
-            request=request,
-            submit_message="Order submitted to broker adapter",
-        )
+        return self.submit_order_request(request=request, submit_message="Order submitted to broker adapter")
 
     def cancel_order(self, order_id: str) -> BrokerActionResponse:
         stored = self._load_order(order_id)
@@ -400,13 +384,7 @@ class ExecutionService:
         )
         self._lifecycle_store.append_event(order_id, cancel_pending, external_order_id=stored.external_order_id)
         self._persist_event(order_id)
-        self._append_audit_event(
-            event_type="cancel_requested",
-            message="Cancel requested",
-            order_id=order_id,
-            symbol=stored.symbol,
-            actor="system",
-        )
+        self._append_audit_event(event_type="cancel_requested", message="Cancel requested", order_id=order_id, symbol=stored.symbol)
 
         request = BrokerCancelOrderRequest(
             order_id=order_id,
@@ -428,13 +406,7 @@ class ExecutionService:
         )
         self._lifecycle_store.append_event(order_id, final_event, external_order_id=stored.external_order_id)
         self._persist_event(order_id)
-        self._append_audit_event(
-            event_type=event_type,
-            message=result.message,
-            order_id=order_id,
-            symbol=stored.symbol,
-            actor="system",
-        )
+        self._append_audit_event(event_type=event_type, message=result.message, order_id=order_id, symbol=stored.symbol)
         result.order_id = order_id
         return result
 
@@ -489,7 +461,6 @@ class ExecutionService:
             message=result.message,
             order_id=order_id,
             symbol=stored.symbol,
-            actor="system",
             metadata=result.raw_response,
         )
         result.order_id = order_id
@@ -509,18 +480,13 @@ class ExecutionService:
             broker_status=broker_status,
             raw_payload=raw_payload,
         )
-        self._lifecycle_store.append_event(
-            order_id,
-            event,
-            external_order_id=stored.external_order_id,
-        )
+        self._lifecycle_store.append_event(order_id, event, external_order_id=stored.external_order_id)
         self._persist_event(order_id)
         self._append_audit_event(
             event_type="broker_update",
             message=event.message or f"Broker update mapped from {broker_status}",
             order_id=order_id,
             symbol=stored.symbol,
-            actor="system",
             metadata=raw_payload,
         )
 
@@ -545,9 +511,29 @@ class ExecutionService:
                     message=f"Position updated for {stored.symbol}",
                     order_id=order_id,
                     symbol=stored.symbol,
-                    actor="system",
                     metadata={"filled_quantity": filled_quantity, "avg_price": avg_price},
                 )
+
+                trades = self._trade_ledger.apply_fill(
+                    FillForLedger(
+                        order_id=order_id,
+                        symbol=stored.symbol,
+                        side=stored.side,
+                        quantity=filled_quantity,
+                        price=avg_price,
+                        event_time=event.event_time,
+                        metadata=event.raw_payload,
+                    )
+                )
+                for trade in trades:
+                    self._persist_trade(trade)
+                    self._append_audit_event(
+                        event_type="trade_created",
+                        message=f"Trade created for {trade.symbol}",
+                        order_id=order_id,
+                        symbol=trade.symbol,
+                        metadata={"trade_id": trade.trade_id, "realized_pnl": trade.realized_pnl},
+                    )
 
         return self._lifecycle_store.get_history(order_id)[-1]
 
@@ -586,6 +572,12 @@ class ExecutionService:
 
     def get_portfolio(self):
         return self._portfolio_service.build_snapshot(self.list_positions())
+
+    def list_trades(self, *, symbol: str | None = None):
+        persisted = self._trade_persistence_repository.list_trades(symbol=symbol) if self._trade_persistence_repository else []
+        if persisted:
+            return persisted
+        return self._trade_ledger.list_trades(symbol=symbol)
 
     def list_order_lifecycle(self) -> list[OrderLifecycleView]:
         if self._persistence_repository is not None:

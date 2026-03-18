@@ -940,3 +940,33 @@
   * Output verified
   * Docs updated
 
+# Item 35 — Trade ledger
+## Checklist
+
+  * Add in-memory trade ledger
+  * Add trade persistence repository
+  * Add trade model
+  * Add FIFO fill matching
+  * Create trades from round-trip fills
+  * Add trade listing in execution service
+  * Add API endpoint for all trades
+  * Add API endpoint for symbol trades
+  * Add tests for realized pnl on closed trade
+  * Add tests for symbol filtering
+  * Add audit event on trade creation
+  * Verify tests pass
+  * Verify runtime trades endpoint
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Trade ledger added
+  * FIFO matching added
+  * API added
+  * Tests added
+  * Runtime path verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+

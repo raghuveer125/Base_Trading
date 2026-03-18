@@ -10,11 +10,11 @@ from services.execution_service.app.models import (
     AuditEventView,
     AuditNoteRequest,
     BrokerPlaceOrderRequest,
-    BrokerPlaceOrderResponse,
     ExecutionRiskView,
     PortfolioView,
     PositionLotView,
     PositionView,
+    TradeView,
 )
 from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine
 from services.execution_service.app.persistence import OrderPersistenceRepository
@@ -25,10 +25,11 @@ from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import (
     ExecutionRiskRejectedError,
     ExecutionService,
-    OrderActionNotAllowedError,
     UnknownBrokerUpdateOrderError,
 )
 from services.execution_service.app.signal_reader import ApprovedSignalReader
+from services.execution_service.app.trade_persistence import TradePersistenceRepository
+from services.execution_service.app.trades import InMemoryTradeLedger
 from services.execution_service.app.update_consumer import BrokerUpdateConsumer
 from services.indicator_engine.app.repository import IndicatorRepository
 from services.risk_service.app.processor import RiskProcessor
@@ -46,6 +47,7 @@ _UPDATE_CONSUMER = BrokerUpdateConsumer()
 _POSITION_SERVICE = PositionService()
 _PORTFOLIO_SERVICE = PortfolioService()
 _AUDIT_TRAIL = InMemoryAuditTrail()
+_TRADE_LEDGER = InMemoryTradeLedger()
 
 
 def _build_persistence_repository(settings) -> OrderPersistenceRepository | None:
@@ -87,6 +89,19 @@ def _build_audit_persistence_repository(settings) -> AuditPersistenceRepository 
         return None
 
 
+def _build_trade_persistence_repository(settings) -> TradePersistenceRepository | None:
+    if not settings.postgres_enabled:
+        return None
+    try:
+        postgres_client = PostgresClient(settings=settings)
+        postgres_client.connect()
+        repository = TradePersistenceRepository(postgres_client=postgres_client)
+        repository.ensure_tables()
+        return repository
+    except Exception:
+        return None
+
+
 def _build_execution_risk_guard(settings) -> ExecutionRiskGuard:
     return ExecutionRiskGuard(
         max_order_quantity=settings.risk_max_signal_size,
@@ -100,6 +115,7 @@ def build_execution_service() -> ExecutionService:
     persistence_repository = _build_persistence_repository(settings)
     position_persistence_repository = _build_position_persistence_repository(settings)
     audit_persistence_repository = _build_audit_persistence_repository(settings)
+    trade_persistence_repository = _build_trade_persistence_repository(settings)
     execution_risk_guard = _build_execution_risk_guard(settings)
 
     postgres_client = PostgresClient(settings=settings)
@@ -128,6 +144,8 @@ def build_execution_service() -> ExecutionService:
         execution_risk_guard=execution_risk_guard,
         audit_trail=_AUDIT_TRAIL,
         audit_persistence_repository=audit_persistence_repository,
+        trade_ledger=_TRADE_LEDGER,
+        trade_persistence_repository=trade_persistence_repository,
     )
 
 
@@ -136,6 +154,7 @@ def build_lifecycle_only_service() -> ExecutionService:
     persistence_repository = _build_persistence_repository(settings)
     position_persistence_repository = _build_position_persistence_repository(settings)
     audit_persistence_repository = _build_audit_persistence_repository(settings)
+    trade_persistence_repository = _build_trade_persistence_repository(settings)
     execution_risk_guard = _build_execution_risk_guard(settings)
     return ExecutionService(
         settings=settings,
@@ -152,6 +171,8 @@ def build_lifecycle_only_service() -> ExecutionService:
         execution_risk_guard=execution_risk_guard,
         audit_trail=_AUDIT_TRAIL,
         audit_persistence_repository=audit_persistence_repository,
+        trade_ledger=_TRADE_LEDGER,
+        trade_persistence_repository=trade_persistence_repository,
     )
 
 
@@ -192,6 +213,49 @@ def execution_risk_check(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+
+@app.post("/execution-service/broker/place")
+def place_manual_order(payload: dict[str, object]) -> dict[str, object]:
+    request = BrokerPlaceOrderRequest(
+        symbol=str(payload.get("symbol", "NSE:SBIN-EQ")),
+        side=str(payload.get("side", "BUY")),
+        quantity=int(payload.get("quantity", 1)),
+        order_type=str(payload.get("order_type", "MARKET")),
+        product=str(payload.get("product", "INTRADAY")),
+        validity=str(payload.get("validity", "DAY")),
+        limit_price=float(payload.get("limit_price", 0.0)),
+        stop_price=float(payload.get("stop_price", 0.0)),
+        disclosed_qty=int(payload.get("disclosed_qty", 0)),
+        offline_order=bool(payload.get("offline_order", False)),
+        stop_loss=float(payload.get("stop_loss", 0.0)),
+        take_profit=float(payload.get("take_profit", 0.0)),
+        correlation_id=str(payload.get("correlation_id", f"manual-order-correlation-{datetime.utcnow().timestamp()}")),
+        idempotency_key=str(payload.get("idempotency_key", f"manual-order-idempotency-{datetime.utcnow().timestamp()}")),
+    )
+    service = build_lifecycle_only_service()
+    try:
+        result = service.submit_order_request(
+            request=request,
+            submit_message="Manual order submitted to broker adapter",
+        )
+    except ExecutionRiskRejectedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "order_id": result.order_id,
+        "duplicate_of_order_id": result.duplicate_of_order_id,
+        "broker": result.broker,
+        "adapter": result.adapter,
+        "accepted": result.accepted,
+        "status": result.status,
+        "external_order_id": result.external_order_id,
+        "processed_at": result.processed_at.isoformat(),
+        "message": result.message,
+        "correlation_id": result.correlation_id,
+        "idempotency_key": result.idempotency_key,
+        "raw_response": result.raw_response,
+    }
+
 @app.post("/execution-service/broker/place-test")
 def place_test() -> dict[str, object]:
     request = BrokerPlaceOrderRequest(
@@ -204,13 +268,9 @@ def place_test() -> dict[str, object]:
         correlation_id=f"manual-test-correlation-{datetime.utcnow().timestamp()}",
         idempotency_key=f"manual-test-idempotency-{datetime.utcnow().timestamp()}",
     )
-
     service = build_lifecycle_only_service()
     try:
-        result = service.submit_order_request(
-            request=request,
-            submit_message="Manual test order submitted to broker adapter",
-        )
+        result = service.submit_order_request(request=request, submit_message="Manual test order submitted to broker adapter")
     except ExecutionRiskRejectedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -240,10 +300,7 @@ def consume_broker_update(payload: dict[str, object]) -> dict[str, object]:
     except (InvalidOrderTransition, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return {
-        "service": "execution_service",
-        "event": event.model_dump(mode="json"),
-    }
+    return {"service": "execution_service", "event": event.model_dump(mode="json")}
 
 
 @app.get("/execution-service/positions")
@@ -332,5 +389,64 @@ def list_audit_events(order_id: str | None = None, limit: int | None = None) -> 
                 metadata=e.metadata,
             ).model_dump(mode="json")
             for e in events
+        ],
+    }
+
+
+@app.get("/execution-service/trades")
+def list_trades(symbol: str | None = None) -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    trades = service.list_trades(symbol=symbol)
+    return {
+        "service": "execution_service",
+        "count": len(trades),
+        "trades": [
+            TradeView(
+                trade_id=t.trade_id,
+                symbol=t.symbol,
+                entry_side=t.entry_side,
+                entry_quantity=t.entry_quantity,
+                entry_price=t.entry_price,
+                entry_time=t.entry_time,
+                exit_quantity=t.exit_quantity,
+                exit_price=t.exit_price,
+                exit_time=t.exit_time,
+                realized_pnl=t.realized_pnl,
+                status=t.status,
+                entry_order_id=t.entry_order_id,
+                exit_order_id=t.exit_order_id,
+                metadata=t.metadata,
+            ).model_dump(mode="json")
+            for t in trades
+        ],
+    }
+
+
+@app.get("/execution-service/trades/{symbol}")
+def list_trades_by_symbol(symbol: str) -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    trades = service.list_trades(symbol=symbol)
+    return {
+        "service": "execution_service",
+        "symbol": symbol,
+        "count": len(trades),
+        "trades": [
+            TradeView(
+                trade_id=t.trade_id,
+                symbol=t.symbol,
+                entry_side=t.entry_side,
+                entry_quantity=t.entry_quantity,
+                entry_price=t.entry_price,
+                entry_time=t.entry_time,
+                exit_quantity=t.exit_quantity,
+                exit_price=t.exit_price,
+                exit_time=t.exit_time,
+                realized_pnl=t.realized_pnl,
+                status=t.status,
+                entry_order_id=t.entry_order_id,
+                exit_order_id=t.exit_order_id,
+                metadata=t.metadata,
+            ).model_dump(mode="json")
+            for t in trades
         ],
     }
