@@ -2,10 +2,12 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException
 
 from services.execution_service.app.brokers.factory import build_broker_adapter
+from services.execution_service.app.execution_risk import ExecutionRiskGuard
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.models import (
     BrokerPlaceOrderRequest,
     BrokerPlaceOrderResponse,
+    ExecutionRiskView,
     PortfolioView,
     PositionLotView,
     PositionView,
@@ -17,6 +19,7 @@ from services.execution_service.app.position_persistence import PositionPersiste
 from services.execution_service.app.positions import PositionService
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import (
+    ExecutionRiskRejectedError,
     ExecutionService,
     OrderActionNotAllowedError,
     UnknownBrokerUpdateOrderError,
@@ -66,10 +69,19 @@ def _build_position_persistence_repository(settings) -> PositionPersistenceRepos
         return None
 
 
+def _build_execution_risk_guard(settings) -> ExecutionRiskGuard:
+    return ExecutionRiskGuard(
+        max_order_quantity=settings.risk_max_signal_size,
+        max_symbol_position_quantity=settings.risk_max_signal_size,
+        max_open_positions=settings.risk_max_open_positions,
+    )
+
+
 def build_execution_service() -> ExecutionService:
     settings = get_settings()
     persistence_repository = _build_persistence_repository(settings)
     position_persistence_repository = _build_position_persistence_repository(settings)
+    execution_risk_guard = _build_execution_risk_guard(settings)
 
     postgres_client = PostgresClient(settings=settings)
     postgres_client.connect()
@@ -94,6 +106,7 @@ def build_execution_service() -> ExecutionService:
         position_service=_POSITION_SERVICE,
         portfolio_service=_PORTFOLIO_SERVICE,
         position_persistence_repository=position_persistence_repository,
+        execution_risk_guard=execution_risk_guard,
     )
 
 
@@ -101,6 +114,7 @@ def build_lifecycle_only_service() -> ExecutionService:
     settings = get_settings()
     persistence_repository = _build_persistence_repository(settings)
     position_persistence_repository = _build_position_persistence_repository(settings)
+    execution_risk_guard = _build_execution_risk_guard(settings)
     return ExecutionService(
         settings=settings,
         signal_reader=None,
@@ -113,89 +127,45 @@ def build_lifecycle_only_service() -> ExecutionService:
         position_service=_POSITION_SERVICE,
         portfolio_service=_PORTFOLIO_SERVICE,
         position_persistence_repository=position_persistence_repository,
+        execution_risk_guard=execution_risk_guard,
     )
 
 
-@app.get("/health")
-def health() -> dict[str, str | bool | int | None]:
-    settings = get_settings()
-    broker_adapter = build_broker_adapter(settings=settings)
-    broker_health = broker_adapter.health_check()
-
-    replay_ready = True
-    approved_loaded = 0
-    active_order_count = _LIFECYCLE_STORE.active_order_count()
-    message = "Execution service ready"
-    open_position_count = len([p for p in _POSITION_SERVICE.list_positions() if p.net_quantity != 0])
-
-    try:
-        service = build_execution_service()
-        status = service.get_status()
-        replay_ready = status.replay_ready
-        approved_loaded = status.approved_loaded
-        active_order_count = status.active_order_count
-        open_position_count = status.open_position_count
-    except Exception as exc:
-        replay_ready = False
-        message = f"Execution service degraded: replay storage unavailable ({exc.__class__.__name__})"
-
+@app.post("/execution-service/risk/check")
+def execution_risk_check(payload: dict[str, object]) -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    request = BrokerPlaceOrderRequest(
+        symbol=str(payload.get("symbol")),
+        side=str(payload.get("side")),
+        quantity=int(payload.get("quantity")),
+        order_type=str(payload.get("order_type", "MARKET")),
+        product=str(payload.get("product", "INTRADAY")),
+        validity=str(payload.get("validity", "DAY")),
+        limit_price=float(payload.get("limit_price", 0.0)),
+        stop_price=float(payload.get("stop_price", 0.0)),
+        disclosed_qty=int(payload.get("disclosed_qty", 0)),
+        offline_order=bool(payload.get("offline_order", False)),
+        stop_loss=float(payload.get("stop_loss", 0.0)),
+        take_profit=float(payload.get("take_profit", 0.0)),
+        correlation_id=payload.get("correlation_id"),
+        idempotency_key=payload.get("idempotency_key"),
+    )
+    decision = service.evaluate_execution_risk(request)
+    limits = service.execution_risk_limits
     return {
         "service": "execution_service",
-        "mode": settings.execution_service_mode,
-        "broker": settings.execution_service_broker,
-        "broker_adapter": broker_health.adapter,
-        "broker_mode": broker_health.mode,
-        "broker_ready": broker_health.ready,
-        "replay_ready": replay_ready,
-        "approved_loaded": approved_loaded,
-        "orders_prepared": 0,
-        "active_order_count": active_order_count,
-        "open_position_count": open_position_count,
-        "last_prepared_at": None,
-        "message": message,
-        "status": "ok" if broker_health.ready else "degraded",
+        "risk": ExecutionRiskView(
+            allowed=decision.allowed,
+            reason=decision.reason,
+            code=decision.code,
+            symbol=request.symbol,
+            side=request.side,
+            quantity=request.quantity,
+            max_order_quantity=limits["max_order_quantity"],
+            max_symbol_position_quantity=limits["max_symbol_position_quantity"],
+            max_open_positions=limits["max_open_positions"],
+        ).model_dump(mode="json"),
     }
-
-
-@app.get("/execution-service/status")
-def execution_status() -> dict[str, str | bool | int | None]:
-    settings = get_settings()
-    broker_adapter = build_broker_adapter(settings=settings)
-    broker_health = broker_adapter.health_check()
-
-    try:
-        status = build_execution_service().get_status()
-        return {
-            "service": status.service,
-            "mode": status.mode,
-            "broker": status.broker,
-            "broker_adapter": status.broker_adapter,
-            "broker_mode": status.broker_mode,
-            "broker_ready": status.broker_ready,
-            "replay_ready": status.replay_ready,
-            "approved_loaded": status.approved_loaded,
-            "orders_prepared": status.orders_prepared,
-            "active_order_count": status.active_order_count,
-            "open_position_count": status.open_position_count,
-            "last_prepared_at": status.last_prepared_at.isoformat() if status.last_prepared_at else None,
-            "message": status.message,
-        }
-    except Exception as exc:
-        return {
-            "service": "execution_service",
-            "mode": settings.execution_service_mode,
-            "broker": settings.execution_service_broker,
-            "broker_adapter": broker_health.adapter,
-            "broker_mode": broker_health.mode,
-            "broker_ready": broker_health.ready,
-            "replay_ready": False,
-            "approved_loaded": 0,
-            "orders_prepared": 0,
-            "active_order_count": _LIFECYCLE_STORE.active_order_count(),
-            "open_position_count": len([p for p in _POSITION_SERVICE.list_positions() if p.net_quantity != 0]),
-            "last_prepared_at": None,
-            "message": f"Execution service degraded: replay storage unavailable ({exc.__class__.__name__})",
-        }
 
 
 @app.post("/execution-service/broker/place-test")
@@ -212,10 +182,13 @@ def place_test() -> dict[str, object]:
     )
 
     service = build_lifecycle_only_service()
-    result = service.submit_order_request(
-        request=request,
-        submit_message="Manual test order submitted to broker adapter",
-    )
+    try:
+        result = service.submit_order_request(
+            request=request,
+            submit_message="Manual test order submitted to broker adapter",
+        )
+    except ExecutionRiskRejectedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {
         "order_id": result.order_id,
@@ -233,36 +206,6 @@ def place_test() -> dict[str, object]:
     }
 
 
-@app.get("/execution-service/orders")
-def list_orders() -> dict[str, object]:
-    service = build_lifecycle_only_service()
-    orders = service.list_order_lifecycle()
-    return {
-        "service": "execution_service",
-        "count": len(orders),
-        "orders": [order.model_dump(mode="json") for order in orders],
-    }
-
-
-@app.get("/execution-service/orders/{order_id}/history")
-def order_history(order_id: str) -> dict[str, object]:
-    service = build_lifecycle_only_service()
-    try:
-        history = service.get_order_history(order_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown order_id: {order_id}") from exc
-
-    if not history:
-        raise HTTPException(status_code=404, detail=f"Unknown order_id: {order_id}")
-
-    return {
-        "service": "execution_service",
-        "order_id": order_id,
-        "history_count": len(history),
-        "history": [event.model_dump(mode="json") for event in history],
-    }
-
-
 @app.post("/execution-service/broker/consume-update")
 def consume_broker_update(payload: dict[str, object]) -> dict[str, object]:
     service = build_lifecycle_only_service()
@@ -276,67 +219,6 @@ def consume_broker_update(payload: dict[str, object]) -> dict[str, object]:
     return {
         "service": "execution_service",
         "event": event.model_dump(mode="json"),
-    }
-
-
-@app.post("/execution-service/orders/{order_id}/cancel")
-def cancel_order(order_id: str) -> dict[str, object]:
-    service = build_lifecycle_only_service()
-    try:
-        result = service.cancel_order(order_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown order_id: {order_id}") from exc
-    except OrderActionNotAllowedError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (InvalidOrderTransition, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return {
-        "order_id": result.order_id,
-        "broker": result.broker,
-        "adapter": result.adapter,
-        "accepted": result.accepted,
-        "status": result.status,
-        "external_order_id": result.external_order_id,
-        "processed_at": result.processed_at.isoformat(),
-        "message": result.message,
-        "correlation_id": result.correlation_id,
-        "idempotency_key": result.idempotency_key,
-        "raw_response": result.raw_response,
-    }
-
-
-@app.post("/execution-service/orders/{order_id}/modify")
-def modify_order(order_id: str, payload: dict[str, object]) -> dict[str, object]:
-    service = build_lifecycle_only_service()
-    try:
-        result = service.modify_order(
-            order_id,
-            quantity=payload.get("quantity"),
-            limit_price=payload.get("limit_price"),
-            stop_price=payload.get("stop_price"),
-            order_type=payload.get("order_type"),
-            validity=payload.get("validity"),
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown order_id: {order_id}") from exc
-    except OrderActionNotAllowedError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (InvalidOrderTransition, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return {
-        "order_id": result.order_id,
-        "broker": result.broker,
-        "adapter": result.adapter,
-        "accepted": result.accepted,
-        "status": result.status,
-        "external_order_id": result.external_order_id,
-        "processed_at": result.processed_at.isoformat(),
-        "message": result.message,
-        "correlation_id": result.correlation_id,
-        "idempotency_key": result.idempotency_key,
-        "raw_response": result.raw_response,
     }
 
 
@@ -359,24 +241,6 @@ def list_positions() -> dict[str, object]:
             ).model_dump(mode="json")
             for p in positions
         ],
-    }
-
-
-@app.get("/execution-service/positions/{symbol}")
-def get_position(symbol: str) -> dict[str, object]:
-    service = build_lifecycle_only_service()
-    p = service.get_position(symbol)
-    return {
-        "service": "execution_service",
-        "position": PositionView(
-            symbol=p.symbol,
-            net_quantity=p.net_quantity,
-            avg_price=p.avg_price,
-            side=p.side,
-            realized_pnl=p.realized_pnl,
-            open_lots=[PositionLotView(quantity=l.quantity, price=l.price, side=l.side) for l in p.open_lots],
-            updated_at=p.updated_at,
-        ).model_dump(mode="json"),
     }
 
 

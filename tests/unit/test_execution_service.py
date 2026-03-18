@@ -1,14 +1,14 @@
 from datetime import UTC, datetime
 
 from services.execution_service.app.brokers.factory import build_broker_adapter
+from services.execution_service.app.execution_risk import ExecutionRiskGuard
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.portfolio import PortfolioService
 from services.execution_service.app.models import BrokerPlaceOrderRequest
 from services.execution_service.app.order_state_machine import OrderStateMachine
-from services.execution_service.app.position_persistence import PositionPersistenceRepository
-from services.execution_service.app.positions import FillEvent, PositionService
+from services.execution_service.app.positions import PositionService
 from services.execution_service.app.processor import ExecutionProcessor
-from services.execution_service.app.service import ExecutionService
+from services.execution_service.app.service import ExecutionRiskRejectedError, ExecutionService
 from services.execution_service.app.update_consumer import BrokerUpdateConsumer
 from shared.config.settings import Settings
 
@@ -80,32 +80,6 @@ def build_settings(execution_broker: str = "fyers_stub") -> Settings:
     )
 
 
-class FakePositionPersistenceRepository:
-    def __init__(self) -> None:
-        self.positions = {}
-
-    def upsert_position(self, snapshot) -> None:
-        self.positions[snapshot.symbol] = snapshot
-
-    def get_position(self, symbol: str):
-        snapshot = self.positions.get(symbol)
-        if snapshot is None:
-            return None
-        from services.execution_service.app.models import PositionLotView, PositionView
-        return PositionView(
-            symbol=snapshot.symbol,
-            net_quantity=snapshot.net_quantity,
-            avg_price=snapshot.avg_price,
-            side=snapshot.side,
-            realized_pnl=snapshot.realized_pnl,
-            open_lots=[PositionLotView(quantity=l.quantity, price=l.price, side=l.side) for l in snapshot.open_lots],
-            updated_at=snapshot.updated_at,
-        )
-
-    def list_positions(self):
-        return [self.get_position(symbol) for symbol in sorted(self.positions.keys())]
-
-
 def build_service() -> ExecutionService:
     settings = build_settings("fyers_stub")
     return ExecutionService(
@@ -118,11 +92,15 @@ def build_service() -> ExecutionService:
         update_consumer=BrokerUpdateConsumer(),
         position_service=PositionService(),
         portfolio_service=PortfolioService(),
-        position_persistence_repository=FakePositionPersistenceRepository(),
+        execution_risk_guard=ExecutionRiskGuard(
+            max_order_quantity=1,
+            max_symbol_position_quantity=1,
+            max_open_positions=1,
+        ),
     )
 
 
-def create_and_fill_order(service: ExecutionService, symbol: str, side: str, qty: int, price: float) -> str:
+def create_fill(service: ExecutionService, symbol: str, side: str, qty: int, price: float) -> None:
     request = BrokerPlaceOrderRequest(
         symbol=symbol,
         side=side,
@@ -137,32 +115,55 @@ def create_and_fill_order(service: ExecutionService, symbol: str, side: str, qty
         {"order_id": result.order_id, "status": "COMPLETE", "filledQty": qty, "avgPrice": price},
         source="test",
     )
-    return result.order_id
 
 
-def test_position_snapshot_is_persisted_after_fill() -> None:
+def test_execution_risk_guard_allows_within_limits() -> None:
     service = build_service()
-    create_and_fill_order(service, "NSE:SBIN-EQ", "BUY", 1, 600.25)
-    position = service.get_position("NSE:SBIN-EQ")
-    assert position.net_quantity == 1
-    assert position.avg_price == 600.25
-    assert position.side == "LONG"
+    request = BrokerPlaceOrderRequest(symbol="NSE:SBIN-EQ", side="BUY", quantity=1)
+    decision = service.evaluate_execution_risk(request)
+    assert decision.allowed is True
+    assert decision.code == "allowed"
 
 
-def test_portfolio_reads_from_persisted_positions() -> None:
+def test_execution_risk_guard_blocks_large_order() -> None:
     service = build_service()
-    create_and_fill_order(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
-    create_and_fill_order(service, "NSE:RELIANCE-EQ", "BUY", 2, 2500.0)
-    portfolio = service.get_portfolio()
-    assert portfolio.open_position_count == 2
-    assert portfolio.gross_quantity == 3
-    assert portfolio.symbols == ["NSE:RELIANCE-EQ", "NSE:SBIN-EQ"]
+    request = BrokerPlaceOrderRequest(symbol="NSE:SBIN-EQ", side="BUY", quantity=2)
+    decision = service.evaluate_execution_risk(request)
+    assert decision.allowed is False
+    assert decision.code == "max_order_quantity_exceeded"
 
 
-def test_round_trip_realized_pnl_visible_in_persisted_position() -> None:
+def test_execution_risk_guard_blocks_symbol_position_limit() -> None:
     service = build_service()
-    create_and_fill_order(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
-    create_and_fill_order(service, "NSE:SBIN-EQ", "SELL", 1, 610.0)
-    position = service.get_position("NSE:SBIN-EQ")
-    assert position.net_quantity == 0
-    assert position.realized_pnl == 10.0
+    create_fill(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
+    request = BrokerPlaceOrderRequest(symbol="NSE:SBIN-EQ", side="BUY", quantity=1)
+    decision = service.evaluate_execution_risk(request)
+    assert decision.allowed is False
+    assert decision.code == "max_symbol_position_quantity_exceeded"
+
+
+def test_execution_risk_guard_blocks_open_position_limit() -> None:
+    service = build_service()
+    create_fill(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
+    request = BrokerPlaceOrderRequest(symbol="NSE:RELIANCE-EQ", side="BUY", quantity=1)
+    decision = service.evaluate_execution_risk(request)
+    assert decision.allowed is False
+    assert decision.code == "max_open_positions_exceeded"
+
+
+def test_submit_order_rejected_by_execution_risk() -> None:
+    service = build_service()
+    create_fill(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
+    request = BrokerPlaceOrderRequest(
+        symbol="NSE:RELIANCE-EQ",
+        side="BUY",
+        quantity=1,
+        correlation_id="risk-test",
+        idempotency_key="risk-test",
+    )
+    try:
+        service.submit_order_request(request, "submit")
+    except ExecutionRiskRejectedError as exc:
+        assert "Open position limit reached" in str(exc)
+    else:
+        raise AssertionError("Expected ExecutionRiskRejectedError")

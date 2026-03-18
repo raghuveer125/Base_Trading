@@ -188,6 +188,18 @@ class PortfolioView(BaseModel):
     updated_at: datetime
 
 
+class ExecutionRiskView(BaseModel):
+    allowed: bool
+    reason: str
+    code: str
+    symbol: str
+    side: str
+    quantity: int
+    max_order_quantity: int
+    max_symbol_position_quantity: int
+    max_open_positions: int
+
+
 class OrderLifecycleView(BaseModel):
     order_id: str
     symbol: str

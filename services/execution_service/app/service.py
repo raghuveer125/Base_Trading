@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from services.execution_service.app.brokers.base import BrokerAdapter
+from services.execution_service.app.execution_risk import ExecutionRiskDecision, ExecutionRiskGuard
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.models import (
     BrokerActionResponse,
@@ -39,6 +40,10 @@ class OrderActionNotAllowedError(ValueError):
     pass
 
 
+class ExecutionRiskRejectedError(ValueError):
+    pass
+
+
 class ExecutionService:
     def __init__(
         self,
@@ -53,6 +58,7 @@ class ExecutionService:
         position_service: PositionService | None = None,
         portfolio_service: PortfolioService | None = None,
         position_persistence_repository: PositionPersistenceRepository | None = None,
+        execution_risk_guard: ExecutionRiskGuard | None = None,
     ) -> None:
         self._settings = settings
         self._signal_reader = signal_reader
@@ -65,8 +71,21 @@ class ExecutionService:
         self._position_service = position_service or PositionService()
         self._portfolio_service = portfolio_service or PortfolioService()
         self._position_persistence_repository = position_persistence_repository
+        self._execution_risk_guard = execution_risk_guard or ExecutionRiskGuard(
+            max_order_quantity=settings.risk_max_signal_size,
+            max_symbol_position_quantity=settings.risk_max_signal_size,
+            max_open_positions=settings.risk_max_open_positions,
+        )
         self._orders_prepared = 0
         self._last_prepared_at: datetime | None = None
+
+    @property
+    def execution_risk_limits(self) -> dict[str, int]:
+        return {
+            "max_order_quantity": self._execution_risk_guard._max_order_quantity,
+            "max_symbol_position_quantity": self._execution_risk_guard._max_symbol_position_quantity,
+            "max_open_positions": self._execution_risk_guard._max_open_positions,
+        }
 
     def _persist_current_order(self, order_id: str) -> None:
         if self._persistence_repository is None:
@@ -113,6 +132,13 @@ class ExecutionService:
                 return persisted.order_id
 
         return None
+
+    def evaluate_execution_risk(self, request: BrokerPlaceOrderRequest) -> ExecutionRiskDecision:
+        positions = self.list_positions()
+        return self._execution_risk_guard.evaluate_order(
+            request=request,
+            positions=positions,
+        )
 
     def _build_duplicate_response(
         self,
@@ -188,6 +214,10 @@ class ExecutionService:
         duplicate_order_id = self._find_duplicate_order_id(request.idempotency_key)
         if duplicate_order_id is not None:
             return self._build_duplicate_response(request=request, order_id=duplicate_order_id)
+
+        risk_decision = self.evaluate_execution_risk(request)
+        if not risk_decision.allowed:
+            raise ExecutionRiskRejectedError(risk_decision.reason)
 
         internal_order_id = self._build_internal_order_id(request.symbol, request.correlation_id)
 

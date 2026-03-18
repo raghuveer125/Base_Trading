@@ -881,3 +881,31 @@
   * Output verified
   * Docs updated
 
+# Item 33 — Execution risk guardrails v2
+## Checklist
+
+  * Add execution risk guard module
+  * Enforce max order quantity
+  * Enforce max symbol position quantity
+  * Enforce max open positions
+  * Add risk evaluation method in execution service
+  * Reject risky order submissions before broker call
+  * Add execution risk check API endpoint
+  * Add tests for all rejection paths
+  * Add tests for allowed path
+  * Verify tests pass
+  * Verify runtime risk endpoint
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Risk checks added
+  * Submission guard added
+  * API added
+  * Tests added
+  * Runtime path verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+
