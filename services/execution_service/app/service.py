@@ -22,6 +22,7 @@ from services.execution_service.app.models import (
 )
 from services.execution_service.app.order_state_machine import OrderStateMachine, OrderStatus
 from services.execution_service.app.persistence import OrderPersistenceRepository
+from services.execution_service.app.pnl import PnlService
 from services.execution_service.app.portfolio import PortfolioService
 from services.execution_service.app.position_persistence import PositionPersistenceRepository
 from services.execution_service.app.positions import FillEvent, PositionService
@@ -68,6 +69,7 @@ class ExecutionService:
         audit_persistence_repository: AuditPersistenceRepository | None = None,
         trade_ledger: InMemoryTradeLedger | None = None,
         trade_persistence_repository: TradePersistenceRepository | None = None,
+        pnl_service: PnlService | None = None,
     ) -> None:
         self._settings = settings
         self._signal_reader = signal_reader
@@ -89,6 +91,7 @@ class ExecutionService:
         self._audit_persistence_repository = audit_persistence_repository
         self._trade_ledger = trade_ledger or InMemoryTradeLedger()
         self._trade_persistence_repository = trade_persistence_repository
+        self._pnl_service = pnl_service or PnlService()
         self._orders_prepared = 0
         self._last_prepared_at: datetime | None = None
 
@@ -99,6 +102,20 @@ class ExecutionService:
             "max_symbol_position_quantity": self._execution_risk_guard._max_symbol_position_quantity,
             "max_open_positions": self._execution_risk_guard._max_open_positions,
         }
+
+    @property
+    def pnl_service(self) -> PnlService:
+        return self._pnl_service
+
+    def set_mark_price(self, symbol: str, price: float) -> None:
+        self._pnl_service.price_store.set_mark(symbol, price)
+
+    def get_position_pnl(self, symbol: str):
+        position = self.get_position(symbol)
+        return self._pnl_service.build_position_snapshot(position)
+
+    def get_portfolio_pnl(self):
+        return self._pnl_service.build_portfolio_snapshot(self.list_positions())
 
     def _append_audit_event(
         self,

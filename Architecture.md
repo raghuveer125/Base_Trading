@@ -970,3 +970,31 @@
   * Output verified
   * Docs updated
 
+# Item 36 — PnL snapshot API
+## Checklist
+
+  * Add PnL service module
+  * Add mark price store
+  * Add per-position PnL snapshot
+  * Add portfolio PnL snapshot
+  * Add mark price API endpoint
+  * Add position PnL API endpoint
+  * Add portfolio PnL API endpoint
+  * Add tests for long unrealized PnL
+  * Add tests for realized plus unrealized aggregation
+  * Verify tests pass
+  * Verify runtime PnL endpoints
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * PnL service added
+  * Mark storage added
+  * API added
+  * Tests added
+  * Runtime path verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+

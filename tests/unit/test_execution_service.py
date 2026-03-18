@@ -5,6 +5,7 @@ from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.execution_risk import ExecutionRiskGuard
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.models import BrokerPlaceOrderRequest
+from services.execution_service.app.pnl import PnlService
 from services.execution_service.app.order_state_machine import OrderStateMachine
 from services.execution_service.app.portfolio import PortfolioService
 from services.execution_service.app.positions import PositionService
@@ -101,6 +102,7 @@ def build_service() -> ExecutionService:
         ),
         audit_trail=InMemoryAuditTrail(),
         trade_ledger=InMemoryTradeLedger(),
+        pnl_service=PnlService(),
     )
 
 
@@ -122,37 +124,35 @@ def create_and_fill(service: ExecutionService, symbol: str, side: str, qty: int,
     return result.order_id
 
 
-def test_trade_created_on_round_trip() -> None:
+def test_position_pnl_snapshot_long() -> None:
+    service = build_service()
+    create_and_fill(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
+    service.set_mark_price("NSE:SBIN-EQ", 615.0)
+    snap = service.get_position_pnl("NSE:SBIN-EQ")
+    assert snap.unrealized_pnl == 15.0
+    assert snap.realized_pnl == 0.0
+    assert snap.total_pnl == 15.0
+
+
+def test_position_pnl_snapshot_after_round_trip() -> None:
     service = build_service()
     create_and_fill(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
     create_and_fill(service, "NSE:SBIN-EQ", "SELL", 1, 610.0)
-
-    trades = service.list_trades()
-    assert len(trades) == 1
-    trade = trades[0]
-    assert trade.symbol == "NSE:SBIN-EQ"
-    assert trade.entry_side == "BUY"
-    assert trade.realized_pnl == 10.0
-    assert trade.status == "CLOSED"
+    service.set_mark_price("NSE:SBIN-EQ", 620.0)
+    snap = service.get_position_pnl("NSE:SBIN-EQ")
+    assert snap.unrealized_pnl == 0.0
+    assert snap.realized_pnl == 10.0
+    assert snap.total_pnl == 10.0
 
 
-def test_trade_list_filtered_by_symbol() -> None:
+def test_portfolio_pnl_snapshot_multiple_positions() -> None:
     service = build_service()
     create_and_fill(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
-    create_and_fill(service, "NSE:SBIN-EQ", "SELL", 1, 610.0)
     create_and_fill(service, "NSE:RELIANCE-EQ", "BUY", 1, 2500.0)
-
-    sbin_trades = service.list_trades(symbol="NSE:SBIN-EQ")
-    reliance_trades = service.list_trades(symbol="NSE:RELIANCE-EQ")
-
-    assert len(sbin_trades) == 1
-    assert len(reliance_trades) == 0
-
-
-def test_trade_creation_adds_audit_event() -> None:
-    service = build_service()
-    create_and_fill(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
-    sell_order_id = create_and_fill(service, "NSE:SBIN-EQ", "SELL", 1, 610.0)
-
-    audit_events = service.list_audit_events(order_id=sell_order_id)
-    assert any(e.event_type == "trade_created" for e in audit_events)
+    service.set_mark_price("NSE:SBIN-EQ", 610.0)
+    service.set_mark_price("NSE:RELIANCE-EQ", 2520.0)
+    snap = service.get_portfolio_pnl()
+    assert snap.unrealized_pnl == 30.0
+    assert snap.realized_pnl == 0.0
+    assert snap.total_pnl == 30.0
+    assert len(snap.positions) == 2

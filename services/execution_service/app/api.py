@@ -11,13 +11,16 @@ from services.execution_service.app.models import (
     AuditNoteRequest,
     BrokerPlaceOrderRequest,
     ExecutionRiskView,
+    PortfolioPnlView,
     PortfolioView,
     PositionLotView,
+    PositionPnlView,
     PositionView,
     TradeView,
 )
 from services.execution_service.app.order_state_machine import InvalidOrderTransition, OrderStateMachine
 from services.execution_service.app.persistence import OrderPersistenceRepository
+from services.execution_service.app.pnl import PnlService
 from services.execution_service.app.portfolio import PortfolioService
 from services.execution_service.app.position_persistence import PositionPersistenceRepository
 from services.execution_service.app.positions import PositionService
@@ -27,7 +30,6 @@ from services.execution_service.app.service import (
     ExecutionService,
     UnknownBrokerUpdateOrderError,
 )
-from services.execution_service.app.signal_reader import ApprovedSignalReader
 from services.execution_service.app.trade_persistence import TradePersistenceRepository
 from services.execution_service.app.trades import InMemoryTradeLedger
 from services.execution_service.app.update_consumer import BrokerUpdateConsumer
@@ -48,6 +50,7 @@ _POSITION_SERVICE = PositionService()
 _PORTFOLIO_SERVICE = PortfolioService()
 _AUDIT_TRAIL = InMemoryAuditTrail()
 _TRADE_LEDGER = InMemoryTradeLedger()
+_PNL_SERVICE = PnlService()
 
 
 def _build_persistence_repository(settings) -> OrderPersistenceRepository | None:
@@ -146,6 +149,7 @@ def build_execution_service() -> ExecutionService:
         audit_persistence_repository=audit_persistence_repository,
         trade_ledger=_TRADE_LEDGER,
         trade_persistence_repository=trade_persistence_repository,
+        pnl_service=_PNL_SERVICE,
     )
 
 
@@ -173,7 +177,71 @@ def build_lifecycle_only_service() -> ExecutionService:
         audit_persistence_repository=audit_persistence_repository,
         trade_ledger=_TRADE_LEDGER,
         trade_persistence_repository=trade_persistence_repository,
+        pnl_service=_PNL_SERVICE,
     )
+
+
+@app.post("/execution-service/marks")
+def set_mark_price(payload: dict[str, object]) -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    symbol = str(payload.get("symbol"))
+    price = float(payload.get("price"))
+    service.set_mark_price(symbol, price)
+    return {
+        "service": "execution_service",
+        "symbol": symbol,
+        "mark_price": price,
+        "status": "ok",
+    }
+
+
+@app.get("/execution-service/pnl/positions/{symbol}")
+def get_position_pnl(symbol: str) -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    snap = service.get_position_pnl(symbol)
+    return {
+        "service": "execution_service",
+        "position_pnl": PositionPnlView(
+            symbol=snap.symbol,
+            side=snap.side,
+            net_quantity=snap.net_quantity,
+            avg_price=snap.avg_price,
+            mark_price=snap.mark_price,
+            unrealized_pnl=snap.unrealized_pnl,
+            realized_pnl=snap.realized_pnl,
+            total_pnl=snap.total_pnl,
+            updated_at=snap.updated_at,
+        ).model_dump(mode="json"),
+    }
+
+
+@app.get("/execution-service/pnl/portfolio")
+def get_portfolio_pnl() -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    snap = service.get_portfolio_pnl()
+    return {
+        "service": "execution_service",
+        "portfolio_pnl": PortfolioPnlView(
+            realized_pnl=snap.realized_pnl,
+            unrealized_pnl=snap.unrealized_pnl,
+            total_pnl=snap.total_pnl,
+            updated_at=snap.updated_at,
+            positions=[
+                PositionPnlView(
+                    symbol=p.symbol,
+                    side=p.side,
+                    net_quantity=p.net_quantity,
+                    avg_price=p.avg_price,
+                    mark_price=p.mark_price,
+                    unrealized_pnl=p.unrealized_pnl,
+                    realized_pnl=p.realized_pnl,
+                    total_pnl=p.total_pnl,
+                    updated_at=p.updated_at,
+                )
+                for p in snap.positions
+            ],
+        ).model_dump(mode="json"),
+    }
 
 
 @app.post("/execution-service/risk/check")
@@ -213,7 +281,6 @@ def execution_risk_check(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
-
 @app.post("/execution-service/broker/place")
 def place_manual_order(payload: dict[str, object]) -> dict[str, object]:
     request = BrokerPlaceOrderRequest(
@@ -234,10 +301,7 @@ def place_manual_order(payload: dict[str, object]) -> dict[str, object]:
     )
     service = build_lifecycle_only_service()
     try:
-        result = service.submit_order_request(
-            request=request,
-            submit_message="Manual order submitted to broker adapter",
-        )
+        result = service.submit_order_request(request=request, submit_message="Manual order submitted to broker adapter")
     except ExecutionRiskRejectedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -255,6 +319,7 @@ def place_manual_order(payload: dict[str, object]) -> dict[str, object]:
         "idempotency_key": result.idempotency_key,
         "raw_response": result.raw_response,
     }
+
 
 @app.post("/execution-service/broker/place-test")
 def place_test() -> dict[str, object]:

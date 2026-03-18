@@ -177,6 +177,26 @@ class PositionView(BaseModel):
     updated_at: datetime
 
 
+class PositionPnlView(BaseModel):
+    symbol: str
+    side: str
+    net_quantity: int
+    avg_price: float
+    mark_price: float
+    unrealized_pnl: float
+    realized_pnl: float
+    total_pnl: float
+    updated_at: datetime
+
+
+class PortfolioPnlView(BaseModel):
+    realized_pnl: float
+    unrealized_pnl: float
+    total_pnl: float
+    updated_at: datetime
+    positions: list[PositionPnlView]
+
+
 class PortfolioView(BaseModel):
     open_position_count: int
     gross_quantity: int
