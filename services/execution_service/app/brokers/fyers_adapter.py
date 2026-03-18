@@ -24,7 +24,7 @@ class FyersBrokerAdapter(BrokerAdapter):
         return self._settings.execution_service_broker
 
     def is_live(self) -> bool:
-        return self._settings.execution_service_broker.strip().lower() == "fyers_live"
+        return self._settings.execution_service_broker.strip().lower() in {"fyers", "fyers_live"}
 
     def health_check(self) -> BrokerHealth:
         has_client_id = bool(self._settings.fyers_client_id.strip())
@@ -77,10 +77,11 @@ class FyersBrokerAdapter(BrokerAdapter):
             "stopPrice": request.stop_price,
             "validity": request.validity,
             "disclosedQty": request.disclosed_qty,
-            "offlineOrder": request.offline_order,
+            "offlineOrder": False,
             "stopLoss": request.stop_loss,
             "takeProfit": request.take_profit,
-            "orderTag": request.idempotency_key or request.correlation_id or "execution_service",
+            "isSliceOrder": False,
+            "orderTag": (request.idempotency_key or request.correlation_id or "execution_service")[:20],
         }
 
     def _extract_order_id(self, response: dict[str, Any]) -> str | None:
@@ -112,11 +113,10 @@ class FyersBrokerAdapter(BrokerAdapter):
         except Exception as exc:
             raise RuntimeError("fyers_apiv3 package is not installed") from exc
 
-        token = f"{self._settings.fyers_client_id}:{self._settings.fyers_access_token}"
         return fyersModel.FyersModel(
             client_id=self._settings.fyers_client_id,
             is_async=False,
-            token=token,
+            token=self._settings.fyers_access_token,
             log_path="",
         )
 

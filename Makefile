@@ -1,19 +1,11 @@
-.PHONY: install format lint test run-auth run-mdg
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
 
-install:
-	python3 -m pip install -e ".[dev]"
+FYERS_BROWSER ?= firefox
 
-format:
-	ruff format .
+.PHONY: fyers-login
 
-lint:
-	ruff check .
-
-test:
-	pytest
-
-run-auth:
-	python3 -m services.auth_service.app.main
-
-run-mdg:
-	python3 -m services.market_data_gateway.app.main
+fyers-login:
+	python scripts/fyers_browser_auth.py

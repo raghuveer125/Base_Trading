@@ -998,3 +998,21 @@
   * Output verified
   * Docs updated
 
+# FYERS browser authentication helper
+## Checklist
+
+  * Add browser-based FYERS auth helper script
+  * Start local callback server on 127.0.0.1:8080
+  * Open FYERS auth URL in default browser
+  * Capture auth code from redirect
+  * Exchange auth code for access token
+  * Write FYERS_ACCESS_TOKEN into .env
+  * Add Makefile target for login helper
+
+## Usage
+
+  * Export FYERS_CLIENT_ID
+  * Export FYERS_SECRET_KEY
+  * Export FYERS_REDIRECT_URI
+  * Run `make fyers-login`
+
