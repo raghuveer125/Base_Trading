@@ -200,6 +200,33 @@ class ExecutionRiskView(BaseModel):
     max_open_positions: int
 
 
+class AuditEventView(BaseModel):
+    audit_id: str
+    event_type: str
+    message: str
+    event_time: datetime
+    order_id: str | None = None
+    symbol: str | None = None
+    actor: str
+    metadata: dict[str, Any] | None = None
+
+
+class AuditNoteRequest(BaseModel):
+    message: str
+    order_id: str | None = None
+    symbol: str | None = None
+    actor: str = "operator"
+    metadata: dict[str, Any] | None = None
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("message is required")
+        return value
+
+
 class OrderLifecycleView(BaseModel):
     order_id: str
     symbol: str

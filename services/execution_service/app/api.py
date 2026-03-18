@@ -1,10 +1,14 @@
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 
+from services.execution_service.app.audit import InMemoryAuditTrail
+from services.execution_service.app.audit_persistence import AuditPersistenceRepository
 from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.execution_risk import ExecutionRiskGuard
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
 from services.execution_service.app.models import (
+    AuditEventView,
+    AuditNoteRequest,
     BrokerPlaceOrderRequest,
     BrokerPlaceOrderResponse,
     ExecutionRiskView,
@@ -41,6 +45,7 @@ _STATE_MACHINE = OrderStateMachine()
 _UPDATE_CONSUMER = BrokerUpdateConsumer()
 _POSITION_SERVICE = PositionService()
 _PORTFOLIO_SERVICE = PortfolioService()
+_AUDIT_TRAIL = InMemoryAuditTrail()
 
 
 def _build_persistence_repository(settings) -> OrderPersistenceRepository | None:
@@ -69,6 +74,19 @@ def _build_position_persistence_repository(settings) -> PositionPersistenceRepos
         return None
 
 
+def _build_audit_persistence_repository(settings) -> AuditPersistenceRepository | None:
+    if not settings.postgres_enabled:
+        return None
+    try:
+        postgres_client = PostgresClient(settings=settings)
+        postgres_client.connect()
+        repository = AuditPersistenceRepository(postgres_client=postgres_client)
+        repository.ensure_tables()
+        return repository
+    except Exception:
+        return None
+
+
 def _build_execution_risk_guard(settings) -> ExecutionRiskGuard:
     return ExecutionRiskGuard(
         max_order_quantity=settings.risk_max_signal_size,
@@ -81,6 +99,7 @@ def build_execution_service() -> ExecutionService:
     settings = get_settings()
     persistence_repository = _build_persistence_repository(settings)
     position_persistence_repository = _build_position_persistence_repository(settings)
+    audit_persistence_repository = _build_audit_persistence_repository(settings)
     execution_risk_guard = _build_execution_risk_guard(settings)
 
     postgres_client = PostgresClient(settings=settings)
@@ -107,6 +126,8 @@ def build_execution_service() -> ExecutionService:
         portfolio_service=_PORTFOLIO_SERVICE,
         position_persistence_repository=position_persistence_repository,
         execution_risk_guard=execution_risk_guard,
+        audit_trail=_AUDIT_TRAIL,
+        audit_persistence_repository=audit_persistence_repository,
     )
 
 
@@ -114,6 +135,7 @@ def build_lifecycle_only_service() -> ExecutionService:
     settings = get_settings()
     persistence_repository = _build_persistence_repository(settings)
     position_persistence_repository = _build_position_persistence_repository(settings)
+    audit_persistence_repository = _build_audit_persistence_repository(settings)
     execution_risk_guard = _build_execution_risk_guard(settings)
     return ExecutionService(
         settings=settings,
@@ -128,6 +150,8 @@ def build_lifecycle_only_service() -> ExecutionService:
         portfolio_service=_PORTFOLIO_SERVICE,
         position_persistence_repository=position_persistence_repository,
         execution_risk_guard=execution_risk_guard,
+        audit_trail=_AUDIT_TRAIL,
+        audit_persistence_repository=audit_persistence_repository,
     )
 
 
@@ -260,4 +284,53 @@ def get_portfolio() -> dict[str, object]:
             symbols=p.symbols,
             updated_at=p.updated_at,
         ).model_dump(mode="json"),
+    }
+
+
+@app.post("/execution-service/audit/note")
+def add_audit_note(payload: dict[str, object]) -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    request = AuditNoteRequest(
+        message=str(payload.get("message", "")),
+        order_id=payload.get("order_id"),
+        symbol=payload.get("symbol"),
+        actor=str(payload.get("actor", "operator")),
+        metadata=payload.get("metadata"),
+    )
+    event = service.add_operator_note(request)
+    return {
+        "service": "execution_service",
+        "event": AuditEventView(
+            audit_id=event.audit_id,
+            event_type=event.event_type,
+            message=event.message,
+            event_time=event.event_time,
+            order_id=event.order_id,
+            symbol=event.symbol,
+            actor=event.actor,
+            metadata=event.metadata,
+        ).model_dump(mode="json"),
+    }
+
+
+@app.get("/execution-service/audit")
+def list_audit_events(order_id: str | None = None, limit: int | None = None) -> dict[str, object]:
+    service = build_lifecycle_only_service()
+    events = service.list_audit_events(order_id=order_id, limit=limit)
+    return {
+        "service": "execution_service",
+        "count": len(events),
+        "events": [
+            AuditEventView(
+                audit_id=e.audit_id,
+                event_type=e.event_type,
+                message=e.message,
+                event_time=e.event_time,
+                order_id=e.order_id,
+                symbol=e.symbol,
+                actor=e.actor,
+                metadata=e.metadata,
+            ).model_dump(mode="json")
+            for e in events
+        ],
     }

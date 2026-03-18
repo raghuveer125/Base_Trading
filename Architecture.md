@@ -909,3 +909,34 @@
   * Output verified
   * Docs updated
 
+# Item 34 — Execution audit trail and operator notes
+## Checklist
+
+  * Add in-memory audit trail
+  * Add audit persistence repository
+  * Add audit event model
+  * Record audit events for order creation and broker ack
+  * Record audit events for risk rejection
+  * Record audit events for broker updates and position updates
+  * Add operator note request model
+  * Add API endpoint to add audit note
+  * Add API endpoint to list audit events
+  * Add tests for operator notes
+  * Add tests for order audit records
+  * Add tests for broker update audit records
+  * Verify tests pass
+  * Verify runtime audit endpoints
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Audit trail added
+  * Operator note support added
+  * API added
+  * Tests added
+  * Runtime path verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+

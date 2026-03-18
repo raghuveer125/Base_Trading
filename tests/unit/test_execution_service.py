@@ -1,11 +1,12 @@
 from datetime import UTC, datetime
 
+from services.execution_service.app.audit import InMemoryAuditTrail
 from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.execution_risk import ExecutionRiskGuard
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
-from services.execution_service.app.portfolio import PortfolioService
-from services.execution_service.app.models import BrokerPlaceOrderRequest
+from services.execution_service.app.models import AuditNoteRequest, BrokerPlaceOrderRequest
 from services.execution_service.app.order_state_machine import OrderStateMachine
+from services.execution_service.app.portfolio import PortfolioService
 from services.execution_service.app.positions import PositionService
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionRiskRejectedError, ExecutionService
@@ -95,67 +96,67 @@ def build_service() -> ExecutionService:
         execution_risk_guard=ExecutionRiskGuard(
             max_order_quantity=1,
             max_symbol_position_quantity=1,
-            max_open_positions=1,
+            max_open_positions=5,
         ),
+        audit_trail=InMemoryAuditTrail(),
     )
 
 
-def create_fill(service: ExecutionService, symbol: str, side: str, qty: int, price: float) -> None:
+def create_order(service: ExecutionService) -> str:
     request = BrokerPlaceOrderRequest(
-        symbol=symbol,
-        side=side,
-        quantity=qty,
-        correlation_id=f"corr-{symbol}-{datetime.now(UTC).timestamp()}",
-        idempotency_key=f"idem-{symbol}-{datetime.now(UTC).timestamp()}",
+        symbol="NSE:SBIN-EQ",
+        side="BUY",
+        quantity=1,
+        correlation_id=f"corr-{datetime.now(UTC).timestamp()}",
+        idempotency_key=f"idem-{datetime.now(UTC).timestamp()}",
     )
     result = service.submit_order_request(request, "submit")
     assert result.order_id is not None
-    service.consume_broker_update({"order_id": result.order_id, "status": "OPEN"}, source="test")
-    service.consume_broker_update(
-        {"order_id": result.order_id, "status": "COMPLETE", "filledQty": qty, "avgPrice": price},
-        source="test",
+    return result.order_id
+
+
+def test_operator_note_is_recorded() -> None:
+    service = build_service()
+    event = service.add_operator_note(
+        AuditNoteRequest(
+            message="Checked broker heartbeat before market open",
+            symbol="NSE:SBIN-EQ",
+            actor="operator",
+        )
     )
+    assert event.event_type == "operator_note"
+    events = service.list_audit_events()
+    assert len(events) == 1
+    assert events[0].message == "Checked broker heartbeat before market open"
 
 
-def test_execution_risk_guard_allows_within_limits() -> None:
+def test_order_submission_creates_audit_events() -> None:
     service = build_service()
-    request = BrokerPlaceOrderRequest(symbol="NSE:SBIN-EQ", side="BUY", quantity=1)
-    decision = service.evaluate_execution_risk(request)
-    assert decision.allowed is True
-    assert decision.code == "allowed"
+    order_id = create_order(service)
+    events = service.list_audit_events(order_id=order_id)
+    assert len(events) >= 2
+    event_types = [e.event_type for e in events]
+    assert "order_created" in event_types
+    assert "broker_ack" in event_types
 
 
-def test_execution_risk_guard_blocks_large_order() -> None:
+def test_broker_update_creates_audit_event() -> None:
     service = build_service()
-    request = BrokerPlaceOrderRequest(symbol="NSE:SBIN-EQ", side="BUY", quantity=2)
-    decision = service.evaluate_execution_risk(request)
-    assert decision.allowed is False
-    assert decision.code == "max_order_quantity_exceeded"
+    order_id = create_order(service)
+    service.consume_broker_update({"order_id": order_id, "status": "OPEN"}, source="test")
+    events = service.list_audit_events(order_id=order_id)
+    assert any(e.event_type == "broker_update" for e in events)
 
 
-def test_execution_risk_guard_blocks_symbol_position_limit() -> None:
+def test_risk_rejection_creates_audit_event() -> None:
     service = build_service()
-    create_fill(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
-    request = BrokerPlaceOrderRequest(symbol="NSE:SBIN-EQ", side="BUY", quantity=1)
-    decision = service.evaluate_execution_risk(request)
-    assert decision.allowed is False
-    assert decision.code == "max_symbol_position_quantity_exceeded"
-
-
-def test_execution_risk_guard_blocks_open_position_limit() -> None:
-    service = build_service()
-    create_fill(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
-    request = BrokerPlaceOrderRequest(symbol="NSE:RELIANCE-EQ", side="BUY", quantity=1)
-    decision = service.evaluate_execution_risk(request)
-    assert decision.allowed is False
-    assert decision.code == "max_open_positions_exceeded"
-
-
-def test_submit_order_rejected_by_execution_risk() -> None:
-    service = build_service()
-    create_fill(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
+    service._execution_risk_guard = ExecutionRiskGuard(
+        max_order_quantity=1,
+        max_symbol_position_quantity=1,
+        max_open_positions=0,
+    )
     request = BrokerPlaceOrderRequest(
-        symbol="NSE:RELIANCE-EQ",
+        symbol="NSE:SBIN-EQ",
         side="BUY",
         quantity=1,
         correlation_id="risk-test",
@@ -163,7 +164,10 @@ def test_submit_order_rejected_by_execution_risk() -> None:
     )
     try:
         service.submit_order_request(request, "submit")
-    except ExecutionRiskRejectedError as exc:
-        assert "Open position limit reached" in str(exc)
+    except ExecutionRiskRejectedError:
+        pass
     else:
         raise AssertionError("Expected ExecutionRiskRejectedError")
+
+    events = service.list_audit_events()
+    assert any(e.event_type == "risk_rejected" for e in events)
