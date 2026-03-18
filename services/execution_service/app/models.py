@@ -177,6 +177,17 @@ class PositionView(BaseModel):
     updated_at: datetime
 
 
+class PortfolioView(BaseModel):
+    open_position_count: int
+    gross_quantity: int
+    net_quantity: int
+    realized_pnl: float
+    long_position_count: int
+    short_position_count: int
+    symbols: list[str]
+    updated_at: datetime
+
+
 class OrderLifecycleView(BaseModel):
     order_id: str
     symbol: str

@@ -820,3 +820,64 @@
   * Output verified
   * Docs updated
 
+# Item 31 — Portfolio snapshot service
+## Checklist
+
+  * Add portfolio service module
+  * Add portfolio snapshot model
+  * Aggregate open position count
+  * Aggregate gross quantity
+  * Aggregate net quantity
+  * Aggregate realized pnl
+  * Count long and short positions
+  * Add portfolio service method to execution service
+  * Add portfolio API endpoint
+  * Add tests for single-symbol portfolio
+  * Add tests for realized pnl aggregation
+  * Add tests for multi-symbol aggregation
+  * Add API test for portfolio endpoint
+  * Verify tests pass
+  * Verify runtime portfolio endpoint
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Portfolio service added
+  * Aggregation added
+  * API added
+  * Tests added
+  * Runtime path verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+
+# Item 32 — Position persistence groundwork
+## Checklist
+
+  * Add position persistence repository
+  * Add execution_positions table
+  * Add execution_position_lots table
+  * Persist position snapshot after fills
+  * Load single position from persistence layer
+  * Load positions list from persistence layer
+  * Wire position persistence into execution service
+  * Keep portfolio aggregation compatible with persisted positions
+  * Add tests for persisted snapshot reads
+  * Add tests for persisted realized pnl visibility
+  * Verify tests pass
+  * Verify runtime positions and portfolio still work
+  * Docs updated
+
+## Definition of done
+
+  * Code written
+  * Position persistence added
+  * Snapshot write path added
+  * Read path added
+  * Tests added
+  * Runtime path verified
+  * Failure case checked
+  * Output verified
+  * Docs updated
+

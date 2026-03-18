@@ -18,6 +18,8 @@ from services.execution_service.app.models import (
 )
 from services.execution_service.app.order_state_machine import OrderStateMachine, OrderStatus
 from services.execution_service.app.persistence import OrderPersistenceRepository
+from services.execution_service.app.portfolio import PortfolioService
+from services.execution_service.app.position_persistence import PositionPersistenceRepository
 from services.execution_service.app.positions import FillEvent, PositionService
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.signal_reader import ApprovedSignalReader
@@ -49,6 +51,8 @@ class ExecutionService:
         persistence_repository: OrderPersistenceRepository | None = None,
         update_consumer: BrokerUpdateConsumer | None = None,
         position_service: PositionService | None = None,
+        portfolio_service: PortfolioService | None = None,
+        position_persistence_repository: PositionPersistenceRepository | None = None,
     ) -> None:
         self._settings = settings
         self._signal_reader = signal_reader
@@ -59,6 +63,8 @@ class ExecutionService:
         self._persistence_repository = persistence_repository
         self._update_consumer = update_consumer or BrokerUpdateConsumer()
         self._position_service = position_service or PositionService()
+        self._portfolio_service = portfolio_service or PortfolioService()
+        self._position_persistence_repository = position_persistence_repository
         self._orders_prepared = 0
         self._last_prepared_at: datetime | None = None
 
@@ -86,6 +92,12 @@ class ExecutionService:
         event = self._lifecycle_store.get(order_id).history[-1]
         self._persistence_repository.insert_event(event)
         self._persist_current_order(order_id)
+
+    def _persist_position_snapshot(self, symbol: str) -> None:
+        if self._position_persistence_repository is None:
+            return
+        snapshot = self._position_service.get_position(symbol)
+        self._position_persistence_repository.upsert_position(snapshot)
 
     def _find_duplicate_order_id(self, idempotency_key: str | None) -> str | None:
         if not idempotency_key:
@@ -237,27 +249,6 @@ class ExecutionService:
         result.order_id = internal_order_id
         return result
 
-    def register_manual_test_order(self, response: BrokerPlaceOrderResponse) -> str:
-        request = BrokerPlaceOrderRequest(
-            symbol="NSE:SBIN-EQ",
-            side="BUY",
-            quantity=1,
-            order_type="MARKET",
-            product="INTRADAY",
-            validity="DAY",
-            correlation_id=response.correlation_id,
-            idempotency_key=response.idempotency_key,
-        )
-        duplicate_order_id = self._find_duplicate_order_id(request.idempotency_key)
-        if duplicate_order_id is not None:
-            return duplicate_order_id
-
-        registered = self.submit_order_request(
-            request=request,
-            submit_message="Manual test order submitted to broker adapter",
-        )
-        return registered.order_id or ""
-
     def place_first_prepared_order_once(self) -> BrokerPlaceOrderResponse:
         orders = self.prepare_once()
         if not orders:
@@ -398,6 +389,7 @@ class ExecutionService:
                         raw_payload=event.raw_payload,
                     )
                 )
+                self._persist_position_snapshot(stored.symbol)
 
         return self._lifecycle_store.get_history(order_id)[-1]
 
@@ -421,10 +413,21 @@ class ExecutionService:
         )
 
     def get_position(self, symbol: str):
+        if self._position_persistence_repository is not None:
+            persisted = self._position_persistence_repository.get_position(symbol)
+            if persisted is not None:
+                return persisted
         return self._position_service.get_position(symbol)
 
     def list_positions(self):
+        if self._position_persistence_repository is not None:
+            persisted = self._position_persistence_repository.list_positions()
+            if persisted:
+                return persisted
         return self._position_service.list_positions()
+
+    def get_portfolio(self):
+        return self._portfolio_service.build_snapshot(self.list_positions())
 
     def list_order_lifecycle(self) -> list[OrderLifecycleView]:
         if self._persistence_repository is not None:
@@ -444,7 +447,7 @@ class ExecutionService:
             if self._persistence_repository is not None
             else self._lifecycle_store.active_order_count()
         )
-        open_position_count = len([p for p in self._position_service.list_positions() if p.net_quantity != 0])
+        open_position_count = len([p for p in self.list_positions() if p.net_quantity != 0])
         return ExecutionServiceStatus(
             service="execution_service",
             mode=self._settings.execution_service_mode,

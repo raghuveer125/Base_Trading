@@ -1,3 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${1:-.}"
+
+cat > "$ROOT/services/execution_service/app/api.py" <<'PY'
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 
@@ -397,3 +403,6 @@ def get_portfolio() -> dict[str, object]:
             updated_at=p.updated_at,
         ).model_dump(mode="json"),
     }
+PY
+
+echo "[OK] Item 32 endpoint restore patch applied"

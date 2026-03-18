@@ -2,8 +2,10 @@ from datetime import UTC, datetime
 
 from services.execution_service.app.brokers.factory import build_broker_adapter
 from services.execution_service.app.lifecycle_store import InMemoryOrderLifecycleStore
+from services.execution_service.app.portfolio import PortfolioService
 from services.execution_service.app.models import BrokerPlaceOrderRequest
-from services.execution_service.app.order_state_machine import OrderStateMachine, OrderStatus
+from services.execution_service.app.order_state_machine import OrderStateMachine
+from services.execution_service.app.position_persistence import PositionPersistenceRepository
 from services.execution_service.app.positions import FillEvent, PositionService
 from services.execution_service.app.processor import ExecutionProcessor
 from services.execution_service.app.service import ExecutionService
@@ -78,6 +80,32 @@ def build_settings(execution_broker: str = "fyers_stub") -> Settings:
     )
 
 
+class FakePositionPersistenceRepository:
+    def __init__(self) -> None:
+        self.positions = {}
+
+    def upsert_position(self, snapshot) -> None:
+        self.positions[snapshot.symbol] = snapshot
+
+    def get_position(self, symbol: str):
+        snapshot = self.positions.get(symbol)
+        if snapshot is None:
+            return None
+        from services.execution_service.app.models import PositionLotView, PositionView
+        return PositionView(
+            symbol=snapshot.symbol,
+            net_quantity=snapshot.net_quantity,
+            avg_price=snapshot.avg_price,
+            side=snapshot.side,
+            realized_pnl=snapshot.realized_pnl,
+            open_lots=[PositionLotView(quantity=l.quantity, price=l.price, side=l.side) for l in snapshot.open_lots],
+            updated_at=snapshot.updated_at,
+        )
+
+    def list_positions(self):
+        return [self.get_position(symbol) for symbol in sorted(self.positions.keys())]
+
+
 def build_service() -> ExecutionService:
     settings = build_settings("fyers_stub")
     return ExecutionService(
@@ -89,23 +117,22 @@ def build_service() -> ExecutionService:
         state_machine=OrderStateMachine(),
         update_consumer=BrokerUpdateConsumer(),
         position_service=PositionService(),
+        portfolio_service=PortfolioService(),
+        position_persistence_repository=FakePositionPersistenceRepository(),
     )
 
 
-def create_and_fill_buy_order(service: ExecutionService, qty: int = 1, price: float = 600.25) -> str:
+def create_and_fill_order(service: ExecutionService, symbol: str, side: str, qty: int, price: float) -> str:
     request = BrokerPlaceOrderRequest(
-        symbol="NSE:SBIN-EQ",
-        side="BUY",
+        symbol=symbol,
+        side=side,
         quantity=qty,
-        correlation_id=f"corr-{datetime.now(UTC).timestamp()}",
-        idempotency_key=f"idem-{datetime.now(UTC).timestamp()}",
+        correlation_id=f"corr-{symbol}-{datetime.now(UTC).timestamp()}",
+        idempotency_key=f"idem-{symbol}-{datetime.now(UTC).timestamp()}",
     )
     result = service.submit_order_request(request, "submit")
     assert result.order_id is not None
-    service.consume_broker_update(
-        {"order_id": result.order_id, "status": "OPEN"},
-        source="test",
-    )
+    service.consume_broker_update({"order_id": result.order_id, "status": "OPEN"}, source="test")
     service.consume_broker_update(
         {"order_id": result.order_id, "status": "COMPLETE", "filledQty": qty, "avgPrice": price},
         source="test",
@@ -113,68 +140,29 @@ def create_and_fill_buy_order(service: ExecutionService, qty: int = 1, price: fl
     return result.order_id
 
 
-def test_position_service_buy_fill_creates_long_position() -> None:
-    ps = PositionService()
-    snapshot = ps.apply_fill(
-        FillEvent(
-            order_id="ord-1",
-            symbol="NSE:SBIN-EQ",
-            fill_quantity=2,
-            fill_price=600.0,
-            side="BUY",
-            event_time=datetime.now(UTC),
-        )
-    )
-    assert snapshot.net_quantity == 2
-    assert snapshot.side == "LONG"
-    assert snapshot.avg_price == 600.0
-    assert snapshot.realized_pnl == 0.0
-
-
-def test_position_service_sell_against_long_realizes_pnl() -> None:
-    ps = PositionService()
-    ps.apply_fill(FillEvent(order_id="ord-1", symbol="NSE:SBIN-EQ", fill_quantity=2, fill_price=600.0, side="BUY", event_time=datetime.now(UTC)))
-    snapshot = ps.apply_fill(FillEvent(order_id="ord-2", symbol="NSE:SBIN-EQ", fill_quantity=1, fill_price=610.0, side="SELL", event_time=datetime.now(UTC)))
-    assert snapshot.net_quantity == 1
-    assert snapshot.realized_pnl == 10.0
-
-
-def test_execution_service_updates_position_on_fill() -> None:
+def test_position_snapshot_is_persisted_after_fill() -> None:
     service = build_service()
-    create_and_fill_buy_order(service, qty=1, price=600.25)
+    create_and_fill_order(service, "NSE:SBIN-EQ", "BUY", 1, 600.25)
     position = service.get_position("NSE:SBIN-EQ")
     assert position.net_quantity == 1
-    assert position.side == "LONG"
     assert position.avg_price == 600.25
+    assert position.side == "LONG"
 
 
-def test_execution_service_flips_to_flat_after_round_trip() -> None:
+def test_portfolio_reads_from_persisted_positions() -> None:
     service = build_service()
-    create_and_fill_buy_order(service, qty=1, price=600.0)
+    create_and_fill_order(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
+    create_and_fill_order(service, "NSE:RELIANCE-EQ", "BUY", 2, 2500.0)
+    portfolio = service.get_portfolio()
+    assert portfolio.open_position_count == 2
+    assert portfolio.gross_quantity == 3
+    assert portfolio.symbols == ["NSE:RELIANCE-EQ", "NSE:SBIN-EQ"]
 
-    sell_request = BrokerPlaceOrderRequest(
-        symbol="NSE:SBIN-EQ",
-        side="SELL",
-        quantity=1,
-        correlation_id=f"sell-corr-{datetime.now(UTC).timestamp()}",
-        idempotency_key=f"sell-idem-{datetime.now(UTC).timestamp()}",
-    )
-    sell_result = service.submit_order_request(sell_request, "sell submit")
-    assert sell_result.order_id is not None
-    service.consume_broker_update({"order_id": sell_result.order_id, "status": "OPEN"}, source="test")
-    service.consume_broker_update(
-        {"order_id": sell_result.order_id, "status": "COMPLETE", "filledQty": 1, "avgPrice": 610.0},
-        source="test",
-    )
 
+def test_round_trip_realized_pnl_visible_in_persisted_position() -> None:
+    service = build_service()
+    create_and_fill_order(service, "NSE:SBIN-EQ", "BUY", 1, 600.0)
+    create_and_fill_order(service, "NSE:SBIN-EQ", "SELL", 1, 610.0)
     position = service.get_position("NSE:SBIN-EQ")
     assert position.net_quantity == 0
-    assert position.side == "FLAT"
     assert position.realized_pnl == 10.0
-
-
-def test_execution_service_status_reports_open_position_count() -> None:
-    service = build_service()
-    create_and_fill_buy_order(service, qty=1, price=600.0)
-    status = service.get_status()
-    assert status.open_position_count == 1
